@@ -39,8 +39,8 @@ air
 - [Transform Dialect Extensions](AIRTransformOps.html)
 
 ### AIR Platform Documentation
-#### [VCK190 platform](../platforms/xilinx_vck190_air)
-#### [VCK5000 platform](../platforms/xilinx_vck5000_air)
+#### [VCK190 platform](platforms/xilinx_vck190_air)
+#### [VCK5000 platform](platforms/xilinx_vck5000_air)
 #### [Building MicroBlaze firmware](vck190_microblaze_firmware.md)
 
 ### Tutorials
