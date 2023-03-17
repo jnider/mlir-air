@@ -25,6 +25,8 @@ air
 
 ## Documentation
 
+Joel has redeployed this with .md links.
+
 ### Getting Started
 
 - [Building](building.md)
