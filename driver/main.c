@@ -25,6 +25,14 @@
 #include <linux/pci.h>
 #include "chardev.h"
 
+#define MAX_HERD_CONTROLLERS 64
+
+/* Offsets into BRAM BAR */
+#define HERD_CONTROLLER_BASE_ADDR(_base, _x)                                   \
+	((((uint64_t)ioread32(_base + (_x * sizeof(uint64_t) + 4))) << 32) |   \
+	 ioread32(_base + (_x * sizeof(uint64_t) + 0)))
+#define REG_HERD_CONTROLLER_COUNT 0x208
+
 static const char air_dev_name[] = "amdair";
 static bool enable_aie;
 
@@ -36,22 +44,65 @@ static struct pci_device_id vck5000_id_table[] = { { PCI_DEVICE(0x10EE,
 
 MODULE_DEVICE_TABLE(pci, vck5000_id_table);
 
+/* Some forward declarations */
 static int vck5000_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
 static void vck5000_remove(struct pci_dev *pdev);
+static ssize_t show_address(struct device *dev, struct device_attribute *attr,
+									char *buf);
+static ssize_t store_address(struct device *dev, struct device_attribute *attr,
+									const char *buf, size_t count);
+static ssize_t show_value(struct device *dev, struct device_attribute *attr,
+									char *buf);
+static ssize_t store_value(struct device *dev, struct device_attribute *attr,
+									const char *buf, size_t count);
+
+static DEVICE_ATTR(address, S_IWUSR | S_IRUGO, show_address, store_address);
+static DEVICE_ATTR(value, S_IWUSR | S_IRUGO, show_value, store_value);
+
+static struct attribute *vck5000_rw_attrs[] = {
+	&dev_attr_address.attr,
+	&dev_attr_value.attr,
+};
+
+const struct attribute_group vck5000_rw_attr_group = {
+	.name = "rw",
+	.attrs = vck5000_rw_attrs,
+};
+
+const struct attribute_group *vck5000_attr_groups[] = {
+	&vck5000_rw_attr_group,
+};
 
 /* Driver registration structure */
 static struct pci_driver vck5000 = { .name = air_dev_name,
 				     .id_table = vck5000_id_table,
 				     .probe = vck5000_probe,
-				     .remove = vck5000_remove };
+				     .remove = vck5000_remove,
+					  .groups = vck5000_attr_groups };
 
-#define MAX_HERD_CONTROLLERS 64
+static ssize_t show_address(struct device *dev, struct device_attribute *attr,
+									char *buf)
+{
+	return 0;
+}
 
-/* Offsets into BRAM BAR */
-#define HERD_CONTROLLER_BASE_ADDR(_base, _x)                                   \
-	((((uint64_t)ioread32(_base + (_x * sizeof(uint64_t) + 4))) << 32) |   \
-	 ioread32(_base + (_x * sizeof(uint64_t) + 0)))
-#define REG_HERD_CONTROLLER_COUNT 0x208
+static ssize_t store_address(struct device *dev, struct device_attribute *attr,
+									const char *buf, size_t count)
+{
+	return 0;
+}
+
+static ssize_t show_value(struct device *dev, struct device_attribute *attr,
+									char *buf)
+{
+	return 0;
+}
+
+static ssize_t store_value(struct device *dev, struct device_attribute *attr,
+									const char *buf, size_t count)
+{
+	return 0;
+}
 
 /*
 	Register the driver with the PCI subsystem
@@ -125,6 +176,8 @@ static int vck5000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	/* Set driver private data */
 	pci_set_drvdata(pdev, drv_priv);
+
+	/* Create sysfs entries for raw memory access */
 
 	/* Request interrupt and set up handler */
 
