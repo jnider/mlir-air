@@ -8,6 +8,7 @@
 
 #include "air_host.h"
 #include "air_host_impl.h"
+#include "amdair_ioctl.h"
 #include "test_library.h"
 
 #ifdef AIR_PCIE
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <string>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -137,10 +139,23 @@ For a non-PCIe device, memory map the base address directly.
                device_id) == SYSFS_PATH_MAX)
     sysfs_path[SYSFS_PATH_MAX] = 0;
 
-  int fda;
-  if ((fda = open(vck5000_driver_name, O_RDWR | O_SYNC)) == -1) {
+  int fd;
+  if ((fd = open(vck5000_driver_name, O_RDWR | O_SYNC)) == -1) {
     printf("[ERROR] %s failed to open %s\n", __func__, vck5000_driver_name);
     return (air_libxaie_ctx_t) nullptr;
+  }
+
+  // create a handle to the AIE memory region
+  struct amdair_create_mr_args mr_args = {
+      .region = AMDAIR_MEM_RANGE_AIE,
+      .device_id = device_id,
+      .start = 0,
+      .size = 0x20000000,
+  };
+
+  if (ioctl(fd, AMDAIR_IOC_CREATE_MEM_REGION, &mr_args) == -1) {
+    printf("Kernel error in create mem region\n");
+    return HSA_STATUS_ERROR_INVALID_REGION;
   }
 
   // Map the AIE memory region into userspace for libxaie to use
@@ -149,14 +164,14 @@ For a non-PCIe device, memory map the base address directly.
                          0x20000000,             // length
                          PROT_READ | PROT_WRITE, // prot
                          MAP_SHARED,             // flags
-                         fda,                    // device fd
-                         0x100000);              // offset
+                         fd,                     // device fd
+                         mr_args.handle);
 
   XAie_BackendType backend;
   if (mapped_aie_base == MAP_FAILED) {
-    printf("Failed mapping AIE BAR - using sysfs backend\n");
-    xaie->AieConfigPtr.Backend = XAIE_IO_BACKEND_SYSFS;
-    backend = XAIE_IO_BACKEND_SYSFS;
+    printf("Failed mapping AIE BAR - using amdair backend\n");
+    xaie->AieConfigPtr.Backend = XAIE_IO_BACKEND_AMDAIR;
+    backend = XAIE_IO_BACKEND_AMDAIR;
     xaie->AieConfigPtr.BaseAddr = 0;
     xaie->DevInst.IOInst = (void *)sysfs_path;
   } else {
@@ -218,8 +233,21 @@ air_module_handle_t air_module_load_from_file(const char *filename, queue_t *q,
   int fd = open(vck5000_driver_name, O_RDWR | O_SYNC);
   assert(fd != -1 && "Failed to open bram fd");
 
+  // create a handle to the BRAM memory region
+  struct amdair_create_mr_args mr_args = {
+      .region = AMDAIR_MEM_RANGE_BRAM,
+      .device_id = device_id,
+      .start = 0x1C0000,
+      .size = 0x8000,
+  };
+
+  if (ioctl(fd, AMDAIR_IOC_CREATE_MEM_REGION, &mr_args) == -1) {
+    printf("Kernel error in create mem region\n");
+    return HSA_STATUS_ERROR_INVALID_REGION;
+  }
+
   _air_host_bram_ptr = (uint32_t *)mmap(NULL, 0x8000, PROT_READ | PROT_WRITE,
-                                        MAP_SHARED, fd, 0x1C0000);
+                                        MAP_SHARED, fd, mr_args.handle);
   _air_host_bram_paddr = AIR_BBUFF_BASE;
 #else
 
