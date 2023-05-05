@@ -13,17 +13,28 @@
 
 #include <stdint.h>
 
+// Default BRAM layout is as follows:
+// 1 system page
+// 1 queue descriptor page, with 16 queue descriptors
+// N (=9 for now, 1 for each BP and 1 for ARM) pages for queue ring buffers
+// Remaining pages for signals, doorbells, etc
+
 // Define the number of HSA packets we can have in a queue
-#define MB_QUEUE_SIZE 48
+#define MB_QUEUE_SIZE 64
 
-// Define the amount of shared memory accessible to each controller
-// This includes the queues, events, doorbells etc
-#define MB_SHMEM_SEGMENT_SIZE 0x1000
+#define MB_SHMEM_QUEUE_STRUCT_OFFSET 0x1000
+#define MB_SHMEM_QUEUE_STRUCT_SIZE 0x1000
 
-// A small area of memory that can be used for signals.
+#define MB_SHMEM_QUEUE_BUFFER_OFFSET MB_SHMEM_QUEUE_STRUCT_OFFSET + MB_SHMEM_QUEUE_STRUCT_SIZE
+#define MB_SHMEM_QUEUE_BUFFER_SIZE 0x9000
+
+// Area of memory that can be used for signals.
 // A controller will initialize these to zero.
-#define MB_SHMEM_SIGNAL_OFFSET 0x0300
-#define MB_SHMEM_SIGNAL_SIZE 0x0100
+#define MB_SHMEM_SIGNAL_OFFSET MB_SHMEM_QUEUE_BUFFER_OFFSET + MB_SHMEM_QUEUE_BUFFER_SIZE
+#define MB_SHMEM_SIGNAL_SIZE 0x14000
+
+#define MB_SHMEM_DOORBELL_OFFSET MB_SHMEM_SIGNAL_OFFSET + MB_SHMEM_SIGNAL_SIZE
+#define MB_SHMEM_DOORBELL_SIZE 0x1000
 
 // See
 // https://confluence.xilinx.com/display/XRLABS/AIR+Controller+HSA+Packet+Formats
@@ -122,7 +133,7 @@ typedef struct queue_s {
   uint32_t type;
   uint32_t features;
   uint64_t base_address;
-  volatile uint64_t doorbell;
+  volatile uint64_t* doorbell;
   uint32_t size;
   uint32_t reserved0;
   uint64_t id;
@@ -134,7 +145,6 @@ typedef struct queue_s {
 
   uint64_t base_address_paddr;
   uint64_t base_address_vaddr;
-
 } __attribute__((packed, aligned(__alignof__(uint64_t)))) queue_t;
 
 typedef struct signal_s {
