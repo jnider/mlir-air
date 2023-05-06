@@ -145,6 +145,8 @@ typedef struct queue_s {
 
   uint64_t base_address_paddr;
   uint64_t base_address_vaddr;
+  uint64_t reserved[22];
+
 } __attribute__((packed, aligned(__alignof__(uint64_t)))) queue_t;
 
 typedef struct signal_s {
