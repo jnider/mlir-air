@@ -61,6 +61,9 @@ The output should match the following (perhaps with a different bus ID):
 
 The VCK5000 AIR platform utilizes two [Embedded RDMA Enabled NICs (ERNICs)](https://www.xilinx.com/products/intellectual-property/ef-di-ernic.html) which each provide 100G RoCEv2 scale-out networking interfaces over the two QSFP cages of the VCK5000. The ARM processor manages the two ERNICs by posting RDMA operations to the ERNIC. More details of the RDMA-oriented HSA packets can be found in the ARM source code as well and the tests that utilize the scale-out functionality. Tests that utilize the VCK5000 Scale-out capability are located in mlir-air/test and numbered in the 300s and are named with a scale-out or rdma identifier. We also provide a standalone test in mlir-air/runtime_lib/test/7_pcie_ernic_mrmac_standalone which bypasses the ARM and AIEs, and has two userpsace programs directly post RDMA commands to the ERNICs. This can be useful to test and debug network connectivity and platform functionality prior to incorporating the rest of AIR into your design. Each scale-out test will have documentation of how the cards should be connected and how the tests should be run.
 
+## Driver
+After programming the card, rebooting the host, and verifying the the card has been programmed properly, the [AIR PCIe driver](https://github.com/Xilinx/mlir-air/tree/main/driver) must be loaded to communicate with the card.
+
 -----
 
 <p align="center">Copyright&copy; 2019-2022 Advanced Micro Devices, Inc.</p>
