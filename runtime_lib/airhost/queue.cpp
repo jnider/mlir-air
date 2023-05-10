@@ -132,8 +132,8 @@ hsa_status_t air_queue_dispatch(queue_t *q, uint64_t doorbell,
                                 dispatch_packet_t *pkt) {
   // dispatch packet
   signal_create(1, 0, NULL, (signal_t *)&pkt->completion_signal);
-  signal_create(0, 0, NULL, (signal_t *)&q->doorbell);
-  signal_store_release((signal_t *)&q->doorbell, doorbell);
+  signal_create(0, 0, NULL, (signal_t *)q->doorbell_vaddr);
+  signal_store_release((signal_t *)q->doorbell_vaddr, doorbell);
   return HSA_STATUS_SUCCESS;
 }
 
@@ -154,8 +154,8 @@ hsa_status_t air_queue_dispatch_and_wait(queue_t *q, uint64_t doorbell,
                                          dispatch_packet_t *pkt) {
   // dispatch packet
   signal_create(1, 0, NULL, (signal_t *)&pkt->completion_signal);
-  signal_create(0, 0, NULL, (signal_t *)&q->doorbell);
-  signal_store_release((signal_t *)&q->doorbell, doorbell);
+  signal_create(0, 0, NULL, (signal_t *)q->doorbell_vaddr);
+  signal_store_release((signal_t *)q->doorbell_vaddr, doorbell);
 
   // wait for packet completion
   while (signal_wait_acquire((signal_t *)&pkt->completion_signal,
