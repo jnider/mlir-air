@@ -352,6 +352,18 @@ hsa_status_t air_packet_l2_dma(dispatch_packet_t *pkt, uint64_t stream,
   return HSA_STATUS_SUCCESS;
 }
 
+hsa_status_t air_program_firmware(dispatch_packet_t *pkt, uint64_t phys_addr, uint32_t file_num_lines) {
+  initialize_packet(pkt);
+
+  pkt->arg[0] = phys_addr;
+  pkt->arg[1] = (uint64_t)file_num_lines;
+
+  pkt->type = AIR_PKT_TYPE_PROG_FIRMWARE;
+  pkt->header = (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
+
+  return HSA_STATUS_SUCCESS;
+}
+
 hsa_status_t air_packet_cdma_configure(dispatch_packet_t *pkt, uint64_t dest,
                                        uint64_t source, uint32_t length) {
   initialize_packet(pkt);
