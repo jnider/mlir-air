@@ -181,7 +181,10 @@ public:
       execution_time = 1;
     } else if (type == "dma") {
       auto Op = mlir::dyn_cast<xilinx::air::DmaMemcpyInterface>(c.op);
-      assert(Op);
+      if (!Op)
+        c.op->emitOpError("has mismatching event type").attachNote()
+            << "Has 'dma' as event type, but op isn't of type "
+               "air::DmaMemcpyInterface";
       MemRefType srcTy = Op.getSrcMemref().getType().cast<MemRefType>();
       MemRefType dstTy = Op.getDstMemref().getType().cast<MemRefType>();
       auto srcSpace = srcTy.getMemorySpaceAsInt();
@@ -195,11 +198,15 @@ public:
     } else if (type == "channel" &&
                (name.find("ChannelGetOp") != std::string::npos)) {
       auto getOp = mlir::dyn_cast<xilinx::air::ChannelGetOp>(c.op);
-      assert(getOp);
+      if (!getOp)
+        c.op->emitOpError("has mismatching event type").attachNote()
+            << "Has 'channel' as event type, but op isn't of type "
+               "air::ChannelGetOp";
       MemRefType dstTy = getOp.getDst().getType().cast<MemRefType>();
       std::vector<air::ChannelPutOp> putOps =
           air::getTheOtherChannelOpThroughSymbol(getOp);
-      assert(putOps.size());
+      if (!putOps.size())
+        getOp->emitOpError("found no put op for air::ChannelGetOp");
       MemRefType srcTy = putOps[0].getSrc().getType().cast<MemRefType>();
       auto srcSpace = srcTy.getMemorySpaceAsInt();
       auto dstSpace = dstTy.getMemorySpaceAsInt();
@@ -210,8 +217,10 @@ public:
       else
         execution_time = getTransferCost(d, c.op, srcSpace, dstSpace, dstTy);
     } else if (type == "execute" && name != "ExecuteTerminatorOp") {
-      assert(dyn_cast<air::ExecuteOp>(c.op) &&
-             "op type and node type do not match");
+      if (!isa<air::ExecuteOp>(c.op))
+        c.op->emitOpError("has mismatching event type").attachNote()
+            << "Has 'execute' as event type, but op isn't of type "
+               "air::ExecuteOp";
       auto child_op = &*(c.op->getRegions().front().getOps().begin());
       if (auto Op = mlir::dyn_cast<linalg::LinalgOp>(child_op)) {
         uint64_t compute_xfer_cost = 0;
@@ -227,14 +236,36 @@ public:
     return execution_time;
   }
 
-  void processGraph(runnerNode &c, device &device_resource_node,
+  bool processGraph(runnerNode &c, device &device_resource_node,
                     uint64_t time) {
+
+    LLVM_DEBUG(llvm::dbgs() << "\nNEW TIME STAMP @" << time - 1 << " runner "
+                            << air::to_string(c.ctrl_g->hierarchyOp) << " loc "
+                            << air::to_string(c.ctrl_g->position) << "'\n");
+
+    executeOpsFromWavefrontAndFreeResource(c, device_resource_node, time);
+    pushOpsToWavefrontAndAllocateResource(c, device_resource_node, time);
+
+    return !c.wavefront.empty();
+  }
+
+  void executeOpsFromWavefrontAndFreeResource(runnerNode &c,
+                                              device &device_resource_node,
+                                              uint64_t time) {
 
     Graph &G = c.ctrl_g->g;
 
+    // Pre-process the wavefront by moving terminator ops to the back
+    // Note: Reason for sorting the wavefront is because executing terminator
+    // event may change the execution status of other ops on wavefront
+    for (int i = c.wavefront.size() - 1; i >= 0; i--) {
+      if (G[std::get<0>(c.wavefront[i])].asyncEventType == "terminator") {
+        moveItemToBack<std::tuple<Graph::vertex_descriptor,
+                                  std::vector<resource *>, unsigned>>(
+            c.wavefront, i);
+      }
+    }
     // Update wavefront
-    std::vector<Graph::vertex_descriptor> next_vertex_set_candidates;
-    std::vector<Graph::vertex_descriptor> next_vertex_set;
     for (auto it = c.wavefront.begin(); it != c.wavefront.end(); ++it) {
       if (G[std::get<0>(*it)].is_started() &&
           G[std::get<0>(*it)].is_done(time)) {
@@ -262,18 +293,20 @@ public:
         it--;
       }
     }
+  }
 
-    // Get all adjacent vertices to the procssed vertices
-    c.findAdjacentVerticesToProcessed(next_vertex_set_candidates);
-    // Remove candidate vertices already on wavefront
-    c.removeRepeatedVertices(next_vertex_set_candidates,
-                             getVectorOfFirstFromVectorOfTuples(c.wavefront));
-    // Remove candidate vertices which are filtered out by an affine.if, if
-    // showing cores
-    if (sim_granularity == "core") {
-      c.removeOpsFilteredOutByAffineIf(next_vertex_set_candidates);
-    }
+  bool pushOpsToWavefrontAndAllocateResource(runnerNode &c,
+                                             device &device_resource_node,
+                                             uint64_t time) {
 
+    Graph &G = c.ctrl_g->g;
+
+    // Get candidate vertices to be pushed to wavefront
+    std::vector<Graph::vertex_descriptor> next_vertex_set_candidates =
+        c.getCandidateVerticesForWavefront();
+
+    // Check dependency fulfillment of each candidate
+    std::vector<Graph::vertex_descriptor> next_vertex_set;
     for (auto it = next_vertex_set_candidates.begin();
          it != next_vertex_set_candidates.end(); ++it) {
       bool dep_fulfilled = true;
@@ -298,12 +331,15 @@ public:
       }
     }
 
+    // Check resource fulfillment of each candidate
     for (auto next_vertex : next_vertex_set) {
 
       // Check whether adj_v's resource requirement has been fulfilled.
       bool res_fulfilled = c.checkResourceFulfillmentForOpImpls(G[next_vertex]);
 
       if (res_fulfilled) {
+        // Delete vertex from latent wavefront candidates
+        c.removeVertexFromVertices(c.latent_wavefront_candidates, next_vertex);
         // Push to wavefront; check for sim. granularity
         c.pushToWavefront(next_vertex,
                           canonicalizer.getIteratorFromPosition(
@@ -323,7 +359,7 @@ public:
       }
     }
 
-    return;
+    return c.wavefront.size() > 0;
   }
 
   void scheduleFunction(func::FuncOp &toplevel) {
@@ -340,7 +376,8 @@ public:
 
     // Walk the json file and create resource model
     auto model = jsonModel.getAsObject();
-    assert(model && "Failed to read JSON model");
+    if (!model)
+      toplevel->emitOpError("failed to read JSON model");
     auto device_resource_node = device(model);
 
     uint64_t time = 1;
@@ -392,34 +429,32 @@ public:
     // TODO: multi-device modelling
     launch.resource_hiers.push_back(&device_resource_node);
 
-    // Allow to run for one more iteration before terminating
-    bool running_0 = true;
-    bool running_1 = true;
-
-    while (running_1) {
+    while (running) {
       LLVM_DEBUG(llvm::dbgs() << "time: " << time << "\n");
 
       running = false;
       std::vector<uint64_t> next_times;
 
-      processGraph(launch, device_resource_node, time);
-      if (launch.wavefront.size()) {
-        running = true;
-        // getTimeStampsFromWavefront(next_times, launch);
-      }
+      running |= processGraph(launch, device_resource_node, time);
 
       for (auto &segment_runner_node : launch.sub_runner_nodes) {
-        processGraph(segment_runner_node, device_resource_node, time);
-        if (segment_runner_node.wavefront.size()) {
-          running = true;
-          // getTimeStampsFromWavefront(next_times, segment_runner_node);
-        }
+        running |=
+            processGraph(segment_runner_node, device_resource_node, time);
         for (auto &herd_runner_node : segment_runner_node.sub_runner_nodes) {
-          processGraph(herd_runner_node, device_resource_node, time);
-          if (herd_runner_node.wavefront.size()) {
-            running = true;
-            // getTimeStampsFromWavefront(next_times, herd_runner_node);
-          }
+          running |= processGraph(herd_runner_node, device_resource_node, time);
+        }
+      }
+
+      // Check event readiness again after updates to resource allocation
+      running |= pushOpsToWavefrontAndAllocateResource(
+          launch, device_resource_node, time);
+
+      for (auto &segment_runner_node : launch.sub_runner_nodes) {
+        running |= pushOpsToWavefrontAndAllocateResource(
+            segment_runner_node, device_resource_node, time);
+        for (auto &herd_runner_node : segment_runner_node.sub_runner_nodes) {
+          running |= pushOpsToWavefrontAndAllocateResource(
+              herd_runner_node, device_resource_node, time);
         }
       }
 
@@ -439,10 +474,6 @@ public:
       time = std::max(time + 1, next_time);
       if (time > 5000000000)
         running = false;
-
-      // Allow to run for one more iteration before terminating
-      running_1 = running_0 || running;
-      running_0 = running;
     }
   }
 
@@ -574,14 +605,12 @@ private:
       if (!datawidth)
         op->emitOpError("found data type with zero width in JSON model");
     } else
-      op->emitOpError(
-          "is data movement with data type not found in JSON model");
+      op->emitOpError("data type not found in JSON model");
 
     double bytes = volume * datawidth;
     double bps = d.interfaces[{srcSpace, dstSpace}]->data_rate;
     if (bps == 0.0f)
-      op->emitOpError(
-          "is data movement with data rate not found in JSON model");
+      op->emitOpError("data rate not found in JSON model");
     double seconds = bytes / bps;
     return (uint64_t)ceil(seconds * cps);
   }
@@ -594,8 +623,8 @@ private:
     std::string cpuops = "math.rsqrt;";
     cpuops += "arith.mulf;arith.divf;arith.addf;arith.subf;arith.truncf;"
               "arith.cmpf;arith.maxf;";
-    cpuops += "arith.muli;arith.divi;arith.addi;arith.subi;arith.trunci;"
-              "arith.cmpi;arith.maxi";
+    cpuops += "arith.muli;arith.divsi;arith.divsi;arith.addi;arith.subi;"
+              "arith.trunci;arith.cmpi;arith.maxi";
     cpuops += "std.select";
     uint64_t memory_op_count = 0;
     uint64_t compute_op_count = 0;
@@ -619,8 +648,10 @@ private:
       double efficiency = 1.0f;
 
       auto model = jsonModel.getAsObject();
-      assert(model);
-      assert(d.kernels.size() && "kernels not found in JSON model");
+      if (!model)
+        op->emitOpError("failed to read JSON model");
+      if (!d.kernels.size())
+        op->emitOpError("found no kernel in JSON model");
 
       // if kernels exists, assume everthing else exists
       // Get operation datatype as the first operand's datatype
@@ -636,8 +667,8 @@ private:
       cycles_per_second = d.clock;
 
       double ops_per_cycle = num_cores * ops_per_core_per_cycle * efficiency;
-      assert(ops_per_cycle > 0 &&
-             "ops per cycle in model must be greater than zero");
+      if (ops_per_cycle <= 0)
+        op->emitOpError("ops per cycle in model must be greater than zero");
 
       double cycles = ceil(compute_op_count / ops_per_cycle);
       compute_op_cost = cycles;
@@ -665,17 +696,11 @@ private:
   // Misc. helper functions
   //===----------------------------------------------------------------------===//
 
-  // Get a vector of first elements from a vector of tuples
-  std::vector<Graph::vertex_descriptor> getVectorOfFirstFromVectorOfTuples(
-      std::vector<std::tuple<Graph::vertex_descriptor, std::vector<resource *>,
-                             unsigned>>
-          tuples) {
-    std::vector<Graph::vertex_descriptor> items;
-    std::transform(
-        tuples.begin(), tuples.end(), std::back_inserter(items),
-        [](const std::tuple<Graph::vertex_descriptor, std::vector<resource *>,
-                            unsigned> &p) { return std::get<0>(p); });
-    return items;
+  // Move an element of the vector to the back
+  template <typename T>
+  void moveItemToBack(std::vector<T> &v, size_t itemIndex) {
+    auto it = v.begin() + itemIndex;
+    std::rotate(it, it + 1, v.end());
   }
 
 }; // AIRRunner_impl
@@ -755,6 +780,12 @@ unsigned lookUpMemorySpaceIntFromString(std::string memory_space) {
     output = 2;
   }
   return output;
+}
+
+template <typename T> void push_back_if_unique(std::vector<T> &vec, T entry) {
+  if (std::find(vec.begin(), vec.end(), entry) == vec.end()) {
+    vec.push_back(entry);
+  }
 }
 
 } // namespace air

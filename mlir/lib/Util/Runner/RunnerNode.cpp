@@ -28,19 +28,36 @@ public:
       wavefront;
   // A vector of vertices processed by the current runner node
   std::vector<Graph::vertex_descriptor> processed_vertices;
+  // An incomplete vector of vertices as candidates to wavefront
+  std::vector<Graph::vertex_descriptor> latent_wavefront_candidates;
   // Sub runner nodes to the current runner node
   std::deque<runnerNode> sub_runner_nodes;
   // Resource hierarchies which are allocated to this runner node
   std::vector<resourceHierarchy *> resource_hiers;
 
-  // Private wavefront of each runner node, reserved to interface with resource
-  // model
-  std::vector<dependencyNodeEntry *> wavefrontNodes() {
-    std::vector<dependencyNodeEntry *> output;
-    for (auto v : wavefront) {
-      output.push_back(&ctrl_g->g[std::get<0>(v)]);
+  // Get a pool of vertices as candidates to be pushed to wavefront. This avoids
+  // having to check every vertex in the graphs for dependency and resource
+  // fulfillment.
+  std::vector<Graph::vertex_descriptor> getCandidateVerticesForWavefront() {
+    // Get candidate vertices to be pushed to wavefront
+    std::vector<Graph::vertex_descriptor> next_vertex_set_candidates;
+    // Get all adj. vertices to the procssed vertices as candidates
+    this->findAdjacentVerticesToProcessed(next_vertex_set_candidates);
+    for (auto v : this->latent_wavefront_candidates) {
+      push_back_if_unique<Graph::vertex_descriptor>(next_vertex_set_candidates,
+                                                    v);
     }
-    return output;
+    // Remove candidate vertices already on wavefront
+    this->removeRepeatedVertices(
+        next_vertex_set_candidates,
+        this->getVectorOfFirstFromVectorOfTuples(this->wavefront));
+    // Remove candidate vertices which are filtered out by an affine.if, if
+    // showing cores
+    if (this->sim_granularity == "core") {
+      this->removeOpsFilteredOutByAffineIf(next_vertex_set_candidates);
+    }
+
+    return next_vertex_set_candidates;
   }
 
   // Push runner "start" signal into wavefront
@@ -50,7 +67,8 @@ public:
     this->consumeResourceHiersWhenRunnerStarts(reserved_resources);
     auto entry = std::make_tuple(v, reserved_resources, (unsigned)1);
     for (auto i : this->wavefront) {
-      assert(std::get<2>(i) != std::get<2>(entry) && "queried thread is busy");
+      this->runner_assertion(std::get<2>(i) != std::get<2>(entry),
+                             "queried thread is busy");
     }
     this->wavefront.push_back(entry);
   }
@@ -145,9 +163,13 @@ public:
   }
 
   // Recursively reset all vertices in for loop body
-  void resetGraphBetweenTwoVertices(Graph::vertex_descriptor start_v,
-                                    Graph::vertex_descriptor end_v, Graph &G,
-                                    uint64_t time) {
+  // "push_to_latent_wavefront_candidates" is a flag to indicate whether to push
+  // vertices adjacent to the resetted vertices to the "wavefront candidate
+  // vertices".
+  void resetGraphBetweenTwoVertices(
+      Graph::vertex_descriptor start_v, Graph::vertex_descriptor end_v,
+      Graph &G, uint64_t time,
+      bool push_to_latent_wavefront_candidates = false) {
 
     this->resetVertex(start_v, G, time);
 
@@ -157,16 +179,13 @@ public:
     SmallVector<Graph::vertex_descriptor, 1> vertices;
     if (this->hasPath(start_v, end_v, G, vertices)) {
       for (auto v : vertices) {
-        this->resetVertex(v, G, time);
+        this->resetVertex(v, G, time, push_to_latent_wavefront_candidates);
         // If v is a hierarchy op, then recursively clear the entire subgraph
         if (G[v].asyncEventType == "hierarchy") {
           for (auto sub_c : G[v].nextDependencyGraphs) {
-            auto start = sub_c->start_vertex;
-            auto terminator_v = sub_c->terminator_vertex;
             auto sub_g = sub_c->g;
             auto sub_runner = sub_c->runner_node;
-            sub_runner->resetGraphBetweenTwoVertices(start, terminator_v, sub_g,
-                                                     time);
+            sub_runner->resetGraph(time);
           }
         }
         // Else if v is an scf.for op, then clear the cached trip count from
@@ -185,12 +204,11 @@ public:
     }
   }
 
-  // Remove vertices in vector a which already exist in vector b
-  void removeRepeatedVertices(std::vector<Graph::vertex_descriptor> &a,
-                              std::vector<Graph::vertex_descriptor> b) {
-    for (auto v : b) {
-      this->removeVertexFromVertices(a, v);
-    }
+  void resetGraph(uint64_t time) {
+    Graph &G = this->ctrl_g->g;
+    auto sub_start_v = this->ctrl_g->start_vertex;
+    auto sub_terminator_v = this->ctrl_g->terminator_vertex;
+    this->resetGraphBetweenTwoVertices(sub_start_v, sub_terminator_v, G, time);
   }
 
   // Consume tokens upon op execution
@@ -203,8 +221,10 @@ public:
       if (G[*inv_adj_v].asyncEventType == "for_loop") {
         int th = this->tokenCountThresholdForExecution(
             G[it].op); // Consume all iter_arg tokens
-        assert(G[it].token_count >=
-               th * (int)this->tokenSpatialFactorForDependency(G[it].op));
+        this->runner_assertion(
+            G[it].token_count >=
+                th * (int)this->tokenSpatialFactorForDependency(G[it].op),
+            "process runs out of async tokens");
         G[it].token_count -=
             th * this->tokenSpatialFactorForDependency(G[it].op);
         return;
@@ -235,27 +255,14 @@ public:
     return dep_fulfilled;
   }
 
-  // Find all vertices adjacent to given vertices in graph
-  void findAdjacentVerticesToProcessed(
-      std::vector<Graph::vertex_descriptor> &adjacent_vertices) {
-    Graph G = this->ctrl_g->g;
-    for (auto v : this->processed_vertices) {
-      auto adj_set = boost::adjacent_vertices(v, G);
-      for (auto v1 = adj_set.first; v1 != adj_set.second; ++v1) {
-        bool found_duplicate = false;
-        for (auto v2 : adjacent_vertices) {
-          if (*v1 == v2) {
-            found_duplicate = true;
-          }
-        }
-        bool is_in_vertices = false;
-        for (auto v3 : this->processed_vertices) {
-          if (*v1 == v3) {
-            is_in_vertices = true;
-          }
-        }
-        if (!found_duplicate && !is_in_vertices) {
-          adjacent_vertices.push_back(*v1);
+  // Remove a vertex from a vector of vertices
+  void removeVertexFromVertices(std::vector<Graph::vertex_descriptor> &vector,
+                                Graph::vertex_descriptor a) {
+    if (vector.size()) {
+      for (auto it = vector.begin(); it != vector.end(); ++it) {
+        if (*it == a) {
+          vector.erase(it);
+          it--;
         }
       }
     }
@@ -287,25 +294,6 @@ public:
       } else {
         pushToDepListIfAffineIfHit(dep_list, G[*inv_adj_v],
                                    this->ctrl_g->position, "ssa");
-      }
-    }
-  }
-
-  // Remove ops in affine.if which aren't running on this core
-  void removeOpsFilteredOutByAffineIf(
-      std::vector<Graph::vertex_descriptor> &candidates) {
-    Graph &G = this->ctrl_g->g;
-    for (auto it = candidates.begin(); it != candidates.end(); ++it) {
-      auto op = G[*it].op;
-      if (op->getParentOfType<mlir::AffineIfOp>()) {
-        std::vector<Operation *> affine_if_nest;
-        Operation *spatial_loop = nullptr;
-        getAffineIfNestAndSpatialLoopFromOp(op, affine_if_nest, spatial_loop);
-        if (!positionHitsAffineIfCondition(op, spatial_loop, affine_if_nest,
-                                           this->ctrl_g->position)) {
-          candidates.erase(it);
-          it--;
-        }
       }
     }
   }
@@ -539,11 +527,11 @@ private:
     // Get number of bytes per element in tensor
     double datawidth = 0;
     auto d = this->getDeviceHier();
-    assert(d);
+    this->runner_assertion(d, "'device' resource not found");
     if (auto bytes = d->datatypes[getElementTypeAsString(ty)]) {
       datawidth = bytes;
     } else {
-      assert(false && "data type not found in JSON model");
+      this->runner_assertion(false, "data type not found in JSON model");
     }
     // Get resource usage multipler for spatial ops which are batch dispatched
     auto spatial_op = this->getAncestorSpatialLoopFromOp(op);
@@ -557,8 +545,8 @@ private:
                                     std::vector<resource *> &reserved_resources,
                                     unsigned usage_count) {
     // A previously emitted error should have captured this
-    assert(usage_count <= resource_pool.size() &&
-           "failed to reserve resources");
+    this->runner_assertion(usage_count <= resource_pool.size(),
+                           "failed to reserve resources");
     for (unsigned i = 0; i < usage_count; i++) {
       resource_pool[i]->isReserved = true;
       reserved_resources.push_back(resource_pool[i]);
@@ -574,7 +562,8 @@ private:
     double remaining = memory_allocated;
     for (auto res : resource_pool) {
       auto mem = static_cast<memory *>(res);
-      assert(mem);
+      this->runner_assertion(mem,
+                             "unknown memory type in memory resource pool");
       auto free_memory = mem->bytes - mem->bytes_used;
       if (free_memory >= remaining) {
         mem->bytes_used += remaining;
@@ -595,7 +584,8 @@ private:
     double remaining = memory_deallocated;
     for (auto res : resource_pool) {
       auto mem = static_cast<memory *>(res);
-      assert(mem);
+      this->runner_assertion(mem,
+                             "unknown memory type in memory resource pool");
       if (mem->bytes_used >= remaining) {
         mem->bytes_used -= remaining;
         remaining = 0;
@@ -870,7 +860,8 @@ private:
         found_entry = true;
       }
     }
-    assert(found_entry && "Cannot find channel symbol name in launch runner");
+    this->runner_assertion(found_entry,
+                           "cannot find channel symbol name in launch runner");
   }
 
   void allocateEventToResources(air::ChannelInterface Op,
@@ -971,7 +962,7 @@ private:
   // Get the number of remaining dispatches in a dynamically dispatched event
   // (e.g., events in scf.parallel)
   unsigned getRemainingDispatchesForDynamicDispatch(air::ChannelPutOp putOp) {
-    // Only launch runner node holds channel_ops_in_progress cache
+    // Only launch runner node shall hold channel_ops_in_progress cache
     if (this->runner_node_type != "launch") {
       return 0;
     }
@@ -1011,17 +1002,16 @@ private:
   void executeOp(xilinx::air::HierarchyInterface op, uint64_t time,
                  runnerNode *sub_runner_node, Graph::vertex_descriptor it) {
     // Initialize sub runner and sub graph prior to execution
-    Graph &G = sub_runner_node->ctrl_g->g;
     auto sub_start_v = sub_runner_node->ctrl_g->start_vertex;
-    auto sub_terminator_v = sub_runner_node->ctrl_g->terminator_vertex;
-    sub_runner_node->resetGraphBetweenTwoVertices(sub_start_v, sub_terminator_v,
-                                                  G, time);
+    sub_runner_node->resetGraph(time);
     sub_runner_node->loop_trip_count.clear();
 
     // Start sub-runner node by pushing start node into its wavefront
     sub_runner_node->ctrl_g->g[sub_start_v].start_time = time;
     sub_runner_node->ctrl_g->g[sub_start_v].end_time = time;
-    assert(!sub_runner_node->wavefront.size() && "Sub runner node is busy");
+    this->runner_assertion(!sub_runner_node->wavefront.size(),
+                           "sub runner node " + air::to_string(op) +
+                               " is busy");
     sub_runner_node->pushStartToWavefront(sub_start_v);
 
     sub_runner_node->processed_vertices.clear();
@@ -1083,7 +1073,9 @@ private:
         // Get the yielded token in the next loop iteration (at the beginning of
         // the loop)
         auto next_iter_token = for_op.getRegionIterArgs()[token_ids[i]];
-        assert(next_iter_token);
+        this->runner_assertion(
+            next_iter_token != nullptr,
+            "token for next loop interation not successfully obtained");
 
         // Search for vertices corresponding to the next-iteration incarnations
         // of this token
@@ -1103,8 +1095,8 @@ private:
         auto reset_vertices_end = this->getVertexInvAdjToLoopYieldedToken(
             op->getOperands()[token_ids[i]]);
         for (auto adj_v : reset_vertices_start) {
-          this->resetGraphBetweenTwoVertices(adj_v, reset_vertices_end, G,
-                                             time);
+          this->resetGraphBetweenTwoVertices(adj_v, reset_vertices_end, G, time,
+                                             true);
           // release the token locks, if the token is still iterating
           if (token_is_still_iterating[i]) {
             G[adj_v].token_count +=
@@ -1169,7 +1161,7 @@ private:
         this->processed_vertices.push_back(it);
       }
     } else
-      assert(false);
+      this->runner_assertion(false, "unknown channel.put op");
   }
 
   void executeOp(air::ChannelGetOp op, Graph::vertex_descriptor it) {
@@ -1181,7 +1173,6 @@ private:
     }
 
     // Get op progress
-    auto put = air::getTheOtherChannelOpThroughSymbol(op);
     auto put_processed = launch_runner->getAlreadyDispatchedForDynamicDispatch(
         op.getChanName().str(), "put");
     auto get_processed = launch_runner->getAlreadyDispatchedForDynamicDispatch(
@@ -1278,8 +1269,10 @@ private:
     }
   }
 
-  // Reset a vertex in dependency graph
-  void resetVertex(Graph::vertex_descriptor v, Graph &G, uint64_t time) {
+  // Reset a vertex in dependency graph. Vertices adj. to recently resetted
+  // vertices could be potential candidates to be pushed to wavefront.
+  void resetVertex(Graph::vertex_descriptor v, Graph &G, uint64_t time,
+                   bool push_to_latent_wavefront_candidates = false) {
 
     // Remove start_v from processed_vertices
     this->removeVertexFromVertices(this->processed_vertices, v);
@@ -1292,16 +1285,14 @@ private:
       G[v].start_time = 0;
       G[v].end_time = 0;
     }
-  }
 
-  // Remove a vertex from a vector of vertices
-  void removeVertexFromVertices(std::vector<Graph::vertex_descriptor> &vector,
-                                Graph::vertex_descriptor a) {
-    if (vector.size()) {
-      for (auto it = vector.begin(); it != vector.end(); ++it) {
-        if (*it == a) {
-          vector.erase(it);
-          it--;
+    // Push adj. vertices to latent wavefront candidates
+    if (push_to_latent_wavefront_candidates) {
+      auto adj_set = boost::adjacent_vertices(v, G);
+      for (auto adj_v = adj_set.first; adj_v != adj_set.second; ++adj_v) {
+        if (!isa<scf::YieldOp>(G[*adj_v].op) && !G[*adj_v].is_started()) {
+          push_back_if_unique<Graph::vertex_descriptor>(
+              this->latent_wavefront_candidates, *adj_v);
         }
       }
     }
@@ -1363,7 +1354,8 @@ private:
     auto adj_set = boost::adjacent_vertices(v, G);
     for (auto adj_v = adj_set.first; adj_v != adj_set.second; ++adj_v) {
       auto adj_op = G[*adj_v].op;
-      assert(adj_op);
+      this->runner_assertion(
+          adj_op, "scf.for op has no adjacent op in dependency graph");
       for (auto d : adj_op->getOperands()) {
         if (d == next_iter_token) {
           adj_vs.push_back(*adj_v);
@@ -1399,7 +1391,7 @@ private:
   bool checkChannelDependenceFulfillment(dependencyNodeEntry dep_node,
                                          std::vector<unsigned> position) {
     auto channel_op = dyn_cast<air::ChannelInterface>(dep_node.op);
-    assert(channel_op);
+    this->runner_assertion(channel_op, "op being checked is not a channel op");
     std::string chan_name = channel_op.getChanName().str();
     unsigned th =
         (position.size())
@@ -1456,7 +1448,7 @@ private:
         return false;
       }
     } else {
-      assert(false && "Unknown async token type");
+      this->runner_assertion(false, "unknown async token type");
     }
     return true;
   }
@@ -1465,7 +1457,8 @@ private:
   bool checkEachDependenceFulfillment(
       std::pair<dependencyNodeEntry, std::string> &dep, uint64_t time) {
     if (dep.second == "ssa") {
-      assert(dep.first.start_time >= 0);
+      this->runner_assertion(dep.first.start_time >= 0,
+                             "invalid event start timestamp");
       if ((!dep.first.is_started()) || (!dep.first.is_done(time))) {
         // If source and sink of dep are both under the same loop
         return false;
@@ -1480,7 +1473,7 @@ private:
         return false;
       }
     } else {
-      assert(false && "Unknown async token type");
+      this->runner_assertion(false, "unknown async token type");
     }
     return true;
   }
@@ -1753,7 +1746,8 @@ private:
     } else if (isa<scf::ParallelOp>(op)) {
       return this->getResourceUsageMultiplier(op, false);
     }
-    assert(false && "TODO: add other simulation granularities");
+    this->runner_assertion(
+        false, "unknown simulation granularity (supported modes: herd, core)");
     return 1;
   }
 
@@ -1832,6 +1826,80 @@ private:
       }
     }
     return parent;
+  }
+
+  // Runner error assertion
+  void runner_assertion(bool cond, std::string msg = "") {
+    if (!cond) {
+      std::cerr << "Error: " + msg + "\n";
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // Get a vector of first elements from a vector of tuples
+  std::vector<Graph::vertex_descriptor> getVectorOfFirstFromVectorOfTuples(
+      std::vector<std::tuple<Graph::vertex_descriptor, std::vector<resource *>,
+                             unsigned>>
+          tuples) {
+    std::vector<Graph::vertex_descriptor> items;
+    std::transform(
+        tuples.begin(), tuples.end(), std::back_inserter(items),
+        [](const std::tuple<Graph::vertex_descriptor, std::vector<resource *>,
+                            unsigned> &p) { return std::get<0>(p); });
+    return items;
+  }
+
+  // Find all vertices adjacent to given vertices in graph
+  void findAdjacentVerticesToProcessed(
+      std::vector<Graph::vertex_descriptor> &adjacent_vertices) {
+    Graph G = this->ctrl_g->g;
+    for (auto v : this->processed_vertices) {
+      auto adj_set = boost::adjacent_vertices(v, G);
+      for (auto v1 = adj_set.first; v1 != adj_set.second; ++v1) {
+        bool found_duplicate = false;
+        for (auto v2 : adjacent_vertices) {
+          if (*v1 == v2) {
+            found_duplicate = true;
+          }
+        }
+        bool is_in_vertices = false;
+        for (auto v3 : this->processed_vertices) {
+          if (*v1 == v3) {
+            is_in_vertices = true;
+          }
+        }
+        if (!found_duplicate && !is_in_vertices) {
+          adjacent_vertices.push_back(*v1);
+        }
+      }
+    }
+  }
+
+  // Remove vertices in vector a which already exist in vector b
+  void removeRepeatedVertices(std::vector<Graph::vertex_descriptor> &a,
+                              std::vector<Graph::vertex_descriptor> b) {
+    for (auto v : b) {
+      this->removeVertexFromVertices(a, v);
+    }
+  }
+
+  // Remove ops in affine.if which aren't running on this core
+  void removeOpsFilteredOutByAffineIf(
+      std::vector<Graph::vertex_descriptor> &candidates) {
+    Graph &G = this->ctrl_g->g;
+    for (auto it = candidates.begin(); it != candidates.end(); ++it) {
+      auto op = G[*it].op;
+      if (op->getParentOfType<mlir::AffineIfOp>()) {
+        std::vector<Operation *> affine_if_nest;
+        Operation *spatial_loop = nullptr;
+        getAffineIfNestAndSpatialLoopFromOp(op, affine_if_nest, spatial_loop);
+        if (!positionHitsAffineIfCondition(op, spatial_loop, affine_if_nest,
+                                           this->ctrl_g->position)) {
+          candidates.erase(it);
+          it--;
+        }
+      }
+    }
   }
 
 }; // runnerNode

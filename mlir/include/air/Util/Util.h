@@ -65,9 +65,11 @@ DmaMemcpyNdOp getAIRDmaInBlock(mlir::Block *block);
 // Get channel declaration through channel symbol
 ChannelOp getChannelDeclarationThroughSymbol(ChannelInterface op);
 // Get ChannelPutOps from ChannelOp
-std::vector<ChannelPutOp> getChannelPutOpThroughSymbol(ChannelOp channel);
+std::vector<ChannelPutOp>
+getChannelPutOpThroughSymbol(ChannelOp channel, Operation *scope = nullptr);
 // Get ChannelGetOps from ChannelOp
-std::vector<ChannelGetOp> getChannelGetOpThroughSymbol(ChannelOp channel);
+std::vector<ChannelGetOp>
+getChannelGetOpThroughSymbol(ChannelOp channel, Operation *scope = nullptr);
 // Get the other channel op through channel symbol
 std::vector<ChannelGetOp> getTheOtherChannelOpThroughSymbol(ChannelPutOp put);
 std::vector<ChannelPutOp> getTheOtherChannelOpThroughSymbol(ChannelGetOp get);
@@ -99,6 +101,10 @@ getAffineIfNestAndSpatialLoopFromOp(Operation *op,
 struct LinalgTransforms {
   static const StringLiteral kLinalgTransformMarker;
 };
+
+// Check if an operand of an operation is read or write access
+char checkOpOperandReadOrWrite(mlir::OpOperand &op_operand);
+char checkOpOperandReadOrWrite(Value op_operand, Operation *owner);
 
 } // namespace air
 } // namespace xilinx

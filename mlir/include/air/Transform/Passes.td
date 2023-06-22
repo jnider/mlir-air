@@ -849,7 +849,84 @@ def AIRPruneLinalgGenericInputDma: Pass<"air-prune-linalg-generic-input-dma", "M
   let constructor = "xilinx::air::createAIRPruneLinalgGenericInputDma()";
   let description = [{
     This pass detects and prunes redundant DMA which copies into linalg generic
-    input operands'. 
+    input operands. 
+  }];
+}
+
+def AIRAnnotateFrontAndBackOpsInForPattern: Pass<"air-annotate-front-and-back-ops-in-for-pattern", "ModuleOp"> {
+  let summary = "Annotates ops in for loop body which are at the front and back of the body's dependency graph";
+  let constructor = "xilinx::air::createAIRAnnotateFrontAndBackOpsInForPattern()";
+  let description = [{
+    This pass analyzes the loop body of an asynchronous for loop and annotates the 
+    asynchronous operations which are located at the front and back of the loop
+    body's dependency tree. This pass is used in the ping-pong pattern transformation 
+    to detect the insertion and exit points in data producer and consumer sub-trees.
+  }];
+}
+
+def AIRHoistMemallocInForPattern: Pass<"air-hoist-alloc-in-for-pattern", "ModuleOp"> {
+  let summary = "Hoist pairs of alloc and dealloc ops out of for loop";
+  let constructor = "xilinx::air::createAIRHoistMemallocInForPattern()";
+  let description = [{
+    This pass hoists pairs of `alloc` and `dealloc` ops out of a for loop body, to 
+    represent the static allocation of memories. This pass is used in the ping-pong
+    pattern transformation to identify and isolate the statically allocated ping and 
+    pong buffers.
+  }];
+}
+
+def AIRUnrollLoopForPipeliningPattern: Pass<"air-unroll-loop-for-pipelining-pattern", "ModuleOp"> {
+  let summary = "Unroll loop by an integer factor";
+  let constructor = "xilinx::air::createAIRUnrollLoopForPipeliningPattern()";
+  let description = [{
+    This pass unrolls a loop by an integer factor. This pass is used in the ping-pong
+    pattern transformation to unroll a scf.for loop by 2 to ensure explicit
+    representation of ping and pong processes, respectively.
+  }];
+}
+
+def AIRConstructPingPongDependencyPattern: Pass<"air-construct-ping-pong-dependency-pattern", "ModuleOp"> {
+  let summary = "Transform an scf.for loop into ping-pong pattern";
+  let constructor = "xilinx::air::createAIRConstructPingPongDependencyPattern()";
+  let description = [{
+    This pass transform an `scf.for` loop into ping-pong pattern, by constructing 
+    dependency edges to connect explicitly unrolled and annotated data producer and 
+    consumer processes for ping and pong buffers, respectively. The dependency edges,
+    being yielded across loop iterations, directly represent a compute scheduling 
+    scheme which leads to concurrency between communication and compute in the form of 
+    ping-pong buffering.
+  }];
+}
+
+def AIRHoistOpsNotUsingPingPongPattern: Pass<"air-hoist-ops-not-using-ping-pong", "ModuleOp"> {
+  let summary = "Hoists ops which are not direct users of the target memref";
+  let constructor = "xilinx::air::createAIRHoistOpsNotUsingPingPongPattern()";
+  let description = [{
+    This pass isolates an `scf.for` loop in preparation for ping-pong transformation,
+    by identifying child operations which are not direct consumers or producers of the 
+    memref targetted for ping-pong buffering, and hoisting said operations out of the
+    scf.for loop.
+  }];
+}
+
+def AIRPingPongTransformationPattern: Pass<"air-ping-pong-transform", "ModuleOp"> {
+  let summary = "Lower to pipelining pattern";
+  let constructor = "xilinx::air::createAIRPingPongTransformationPattern()";
+  let description = [{
+    This pass lowers to pipelining pattern. This pass looks for the target ping and 
+    pong buffers, and a surrounding scf.for loop, to construct explicit dependency 
+    edges which represent a ping-pong buffering scheduling.
+  }];
+}
+
+def AIRLabelScfForLoopForPingPongPattern: Pass<"air-label-scf-for-to-ping-pong", "ModuleOp"> {
+  let summary = "Label all candidate scf.for loops for ping-pong transformation";
+  let constructor = "xilinx::air::createAIRLabelScfForLoopForPingPongPattern()";
+  let description = [{
+    This pass labels all scf.for loops which contain air.execute event of memref.alloc,
+    which is a direct child op of said scf.for, as candidate loop for ping-pong
+    transformation. The label includes an attribute added to the child memref.alloc ops
+    for subsequent hoisting, and an attribute added to the scf.for with an unroll factor.
   }];
 }
 
@@ -961,4 +1038,10 @@ def AIRLowerHerdParallelPass : Pass<"air-lower-herd-parallel", "func::FuncOp"> {
                 "scf.for.";
   let constructor = "xilinx::air::createAIRLowerHerdParallelPass()";
 }
+
+def AIRHoistScfChannelGetPutPass : Pass<"air-hoist-channels", "func::FuncOp"> {
+  let summary = "Hoist air.channel.get and air.channel.put out of scf.for.";
+  let constructor = "xilinx::air::createAIRHoistScfChannelGetPutPass()";
+}
+
 #endif // AIR_CONVERSION_PASSES
