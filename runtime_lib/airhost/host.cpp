@@ -10,6 +10,7 @@
 #include "air_host_impl.h"
 #include "amdair_ioctl.h"
 #include "test_library.h"
+#include "air.hpp"
 
 #ifdef AIR_PCIE
 #include "utility.hpp"
@@ -46,8 +47,8 @@
 // temporary solution to stash some state
 extern "C" {
 
-air_rt_herd_desc_t _air_host_active_herd = {nullptr, nullptr};
-air_rt_segment_desc_t _air_host_active_segment = {nullptr, nullptr};
+air_rt_herd_desc_t _air_host_active_herd = {nullptr, nullptr, nullptr};
+air_rt_segment_desc_t _air_host_active_segment = {nullptr, nullptr, nullptr};
 aie_libxaie_ctx_t *_air_host_active_libxaie = nullptr;
 uint32_t *_air_host_bram_ptr = nullptr;
 uint64_t _air_host_bram_paddr = 0;
@@ -60,15 +61,62 @@ const char vck5000_driver_name[] = "/dev/amdair";
 std::vector<air_physical_device_t> physical_devices;
 #endif
 
+
+
+// Determining if an hsa agent is an AIE agent or not
+hsa_status_t find_aie(hsa_agent_t agent, void *data)
+{
+  hsa_status_t status(HSA_STATUS_SUCCESS);
+  hsa_device_type_t device_type;
+  std::vector<hsa_agent_t> *aie_agents = nullptr;
+
+  if (!data) {
+    status = HSA_STATUS_ERROR_INVALID_ARGUMENT;
+    printf("find_aie: INVALID ARGUMENT\n");
+    return status;
+  }
+
+  aie_agents = static_cast<std::vector<hsa_agent_t>*>(data);
+  status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
+
+  printf("[EDDIE DEBUG] Done calling agent info. Device type is 0x%x\n", device_type);
+
+  if (status != HSA_STATUS_SUCCESS) {
+    return status;
+  }
+
+  if (device_type == HSA_DEVICE_TYPE_AIE) {
+    aie_agents->push_back(agent);
+  }
+
+  return status;
+}
+
 hsa_status_t air_init() {
   printf("%s\n", __func__);
 #ifdef AIR_PCIE
-  hsa_status_t hsa_ret = air_get_physical_devices();
+
+  hsa_status_t hsa_ret = hsa_init();
+  if (hsa_ret != HSA_STATUS_SUCCESS) {
+    std::cerr << "hsa_init failed" << std::endl;
+    return hsa_ret;
+  }
+
+  hsa_ret = air_get_physical_devices();
 
   if (hsa_ret != HSA_STATUS_SUCCESS) {
     std::cerr << "air_get_physical_devices failed" << std::endl;
     return hsa_ret;
   }
+
+  // Initializing the device memory allocator
+  if (air_init_dev_mem_allocator(0x8000 /* dev_mem_size */,
+                                 0 /* device_id (optional)*/)) {
+    std::cout << "Error creating device memory allocator" << std::endl;
+    return HSA_STATUS_ERROR;
+  }
+
+  
 #endif
 
   if (_air_host_active_libxaie == nullptr)
@@ -89,6 +137,15 @@ hsa_status_t air_shut_down() {
 
   if (_air_host_active_libxaie)
     air_deinit_libxaie((air_libxaie_ctx_t)_air_host_active_libxaie);
+
+  air_dev_mem_allocator_free();
+
+  hsa_status_t hsa_ret = hsa_shut_down();
+  if(hsa_ret != HSA_STATUS_SUCCESS) {
+    printf("[ERROR] hsa_shut_down() failed\n");
+    return HSA_STATUS_ERROR;
+  }
+
   return HSA_STATUS_SUCCESS;
 }
 
@@ -158,28 +215,13 @@ For a non-PCIe device, memory map the base address directly.
     return HSA_STATUS_ERROR_INVALID_REGION;
   }
 
-  // Map the AIE memory region into userspace for libxaie to use
-  volatile void *mapped_aie_base = nullptr;
-  mapped_aie_base = mmap(NULL,                   // virtual address
-                         0x20000000,             // length
-                         PROT_READ | PROT_WRITE, // prot
-                         MAP_SHARED,             // flags
-                         fd,                     // device fd
-                         mr_args.handle);
-
   XAie_BackendType backend;
-  if (mapped_aie_base == MAP_FAILED) {
-    printf("Failed mapping AIE BAR - using amdair backend\n");
-    xaie->AieConfigPtr.Backend = XAIE_IO_BACKEND_AMDAIR;
-    backend = XAIE_IO_BACKEND_AMDAIR;
-    xaie->AieConfigPtr.BaseAddr = 0;
-    xaie->DevInst.IOInst = (void *)sysfs_path;
-  } else {
-    printf("Using Linux backend\n");
-    xaie->AieConfigPtr.Backend = XAIE_IO_BACKEND_LINUX;
-    backend = XAIE_IO_BACKEND_METAL;
-    xaie->AieConfigPtr.BaseAddr = (uint64_t)mapped_aie_base;
-  }
+  printf("Failed mapping AIE BAR - using amdair backend\n");
+  xaie->AieConfigPtr.Backend = XAIE_IO_BACKEND_AMDAIR;
+  backend = XAIE_IO_BACKEND_AMDAIR;
+  xaie->AieConfigPtr.BaseAddr = 0;
+  xaie->DevInst.IOInst = (void *)sysfs_path;
+
 #else
   xaie->AieConfigPtr.BaseAddr = XAIE_BASE_ADDR;
 #endif
@@ -208,7 +250,7 @@ void air_deinit_libxaie(air_libxaie_ctx_t _xaie) {
   free(xaie);
 }
 
-air_module_handle_t air_module_load_from_file(const char *filename, queue_t *q,
+air_module_handle_t air_module_load_from_file(const char *filename, hsa_agent_t *agent, hsa_queue_t *q,
                                               uint32_t device_id) {
   if (_air_host_active_module)
     air_module_unload(_air_host_active_module);
@@ -220,8 +262,8 @@ air_module_handle_t air_module_load_from_file(const char *filename, queue_t *q,
     return 0;
   }
   _air_host_active_module = (air_module_handle_t)_handle;
-  _air_host_active_herd = {q, nullptr};
-  _air_host_active_segment = {q, nullptr};
+  _air_host_active_herd = {q, agent, nullptr};
+  _air_host_active_segment = {q, agent, nullptr};
 
 #ifdef AIR_PCIE
 
@@ -280,7 +322,7 @@ int32_t air_module_unload(air_module_handle_t handle) {
         auto herd_desc = module_desc->segment_descs[i]->herd_descs[j];
         if (herd_desc == _air_host_active_herd.herd_desc) {
           _air_host_active_herd = {nullptr, nullptr};
-          _air_host_active_segment = {nullptr, nullptr};
+          _air_host_active_segment = {nullptr, nullptr, nullptr};
         }
       }
     }
@@ -357,20 +399,19 @@ uint64_t air_segment_load(const char *name) {
                      &(_air_host_active_libxaie->AieConfigPtr));
   XAie_PmRequestTiles(&(_air_host_active_libxaie->DevInst), NULL, 0);
 
-  uint64_t wr_idx = queue_add_write_index(_air_host_active_segment.q, 1);
+  uint64_t wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_segment.q, 1);
   uint64_t packet_id = wr_idx % _air_host_active_segment.q->size;
-  dispatch_packet_t *shim_pkt =
-      (dispatch_packet_t *)(_air_host_active_segment.q->base_address_vaddr) +
-      packet_id;
-  air_packet_device_init(shim_pkt, XAIE_NUM_COLS);
+  hsa_agent_dispatch_packet_t shim_pkt;
+  air_packet_device_init(&shim_pkt, XAIE_NUM_COLS);
+  air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_segment.q, packet_id, &shim_pkt);
+  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, wr_idx, &shim_pkt);
 
-  wr_idx = queue_add_write_index(_air_host_active_segment.q, 1);
+  wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_segment.q, 1);
   packet_id = wr_idx % _air_host_active_segment.q->size;
-  dispatch_packet_t *herd_pkt =
-      (dispatch_packet_t *)(_air_host_active_segment.q->base_address_vaddr) +
-      packet_id;
-  air_packet_herd_init(herd_pkt, 0, 0, 50, 1, 8);
-  air_queue_dispatch_and_wait(_air_host_active_segment.q, wr_idx, herd_pkt);
+  hsa_agent_dispatch_packet_t herd_pkt;
+  air_packet_herd_init(&herd_pkt, 0, 0, 50, 1, 8);
+  air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_segment.q, packet_id, &herd_pkt);
+  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, wr_idx, &herd_pkt);
 
 #else
   XAie_Finish(&(_air_host_active_libxaie->DevInst));
@@ -539,6 +580,10 @@ std::string air_get_bram_bar(uint32_t device_id) {
 }
 #endif
 
+/*
+
+// TODO: Have wait all use proper HSA
+
 uint64_t air_wait_all(std::vector<uint64_t> &signals) {
   queue_t *q = _air_host_active_segment.q;
   if (!q) {
@@ -581,6 +626,7 @@ uint64_t air_wait_all(std::vector<uint64_t> &signals) {
 
   return 0;
 }
+*/
 
 uint64_t air_get_tile_addr(uint32_t col, uint32_t row) {
   if (_air_host_active_libxaie == NULL)
@@ -616,7 +662,8 @@ uint64_t _mlir_ciface___airrt_segment_load(const char *name) {
   return air_segment_load(name);
 }
 
-void _mlir_ciface___airrt_wait_all_0_0() { return; }
+// TODO: Have wait all fucntionality use HSA
+/*void _mlir_ciface___airrt_wait_all_0_0() { return; }
 void _mlir_ciface___airrt_wait_all_0_1(uint64_t e0) {
   std::vector<uint64_t> events{e0, 0, 0, 0, 0};
   air_wait_all(events);
@@ -649,6 +696,6 @@ uint64_t _mlir_ciface___airrt_wait_all_1_3(uint64_t e0, uint64_t e1,
                                            uint64_t e2) {
   std::vector<uint64_t> events{e0, e1, e2, 0, 0};
   return air_wait_all(events);
-}
+}*/
 
 } // extern C

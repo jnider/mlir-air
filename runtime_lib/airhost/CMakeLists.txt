@@ -44,6 +44,11 @@ set_property(TARGET airhost_shared PROPERTY POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(airhost
   ${AIR_LIBXAIE_LIBS}
   dl
+  hsa-runtime64::hsa-runtime64
+)
+
+target_link_libraries(airhost_shared
+  hsa-runtime64::hsa-runtime64
 )
 
 set_target_properties(airhost PROPERTIES

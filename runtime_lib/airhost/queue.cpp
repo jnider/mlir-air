@@ -22,6 +22,9 @@
 #include "air_queue.h"
 #include "amdair_ioctl.h"
 
+#include "hsa/hsa_ext_amd.h"
+#include "hsa/hsa.h"
+
 #define ALIGN(_x, _size) (((_x) + ((_size)-1)) & ~((_size)-1))
 
 // Need access to the physical devices to determine where to
@@ -30,31 +33,35 @@
 extern std::vector<air_physical_device_t> physical_devices;
 #endif
 
-hsa_status_t air_get_agent_info(queue_t *queue, air_agent_info_t attribute,
+hsa_status_t air_get_agent_info(hsa_agent_t *agent, hsa_queue_t *queue, air_agent_info_t attribute,
                                 void *data) {
   if ((data == nullptr) || (queue == nullptr)) {
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
   }
 
-  uint64_t wr_idx = queue_add_write_index(queue, 1);
+  // Getting our slot in the queue
+  uint64_t wr_idx = hsa_queue_add_write_index_relaxed(queue, 1);
   uint64_t packet_id = wr_idx % queue->size;
 
-  dispatch_packet_t *pkt =
-      (dispatch_packet_t *)(queue->base_address_vaddr) + packet_id;
-  initialize_packet(pkt);
-  pkt->arg[0] = attribute;
-  // pkt->return_address = data; // FIXME this won't work without address
-  // translation
-  pkt->type = AIR_PKT_TYPE_GET_INFO;
-  pkt->header = (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
-  air_queue_dispatch_and_wait(queue, wr_idx, pkt);
+  // Getting a pointer to where the packet is in the queue
+  hsa_agent_dispatch_packet_t aql_pkt;
 
-  // fake it because of no address translation
+  // Writing the fields to the packet
+  aql_pkt.arg[0] = attribute;
+  aql_pkt.type = AIR_PKT_TYPE_GET_INFO;
+  aql_pkt.header |= (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
+  
+  // Now, we need to send the packet out
+  air_queue_dispatch_and_wait(agent, queue, wr_idx, &aql_pkt);
+
+  // We encode the response in the packet, so need to peek in to get the data
+  hsa_agent_dispatch_packet_t pkt_peek = reinterpret_cast<hsa_agent_dispatch_packet_t*>(queue->base_address)[packet_id];
   if (attribute <= AIR_AGENT_INFO_VENDOR_NAME) {
-    std::memcpy(data, &pkt->return_address, 8);
+    std::memcpy(data, &pkt_peek.return_address, 8);
   } else {
-    uint64_t *p = static_cast<uint64_t *>(data);
-    *p = pkt->return_address;
+    /*uint64_t *p = static_cast<uint64_t *>(data);
+    *p = static_cast<uint64_t>(pkt_peek.return_address);*/
+    data = pkt_peek.return_address;
   }
   return HSA_STATUS_SUCCESS;
 }
@@ -77,7 +84,7 @@ hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
 
   printf("Creating queue\n");
   struct amdair_create_queue_args cq_args = {
-      .ring_size = MB_QUEUE_SIZE,
+      .ring_size_bytes = MB_QUEUE_SIZE,
       .device_id = device_id,
       .queue_type = AMDAIR_QUEUE_DEVICE,
   };
@@ -157,53 +164,65 @@ hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_queue_dispatch(queue_t *q, uint64_t doorbell,
-                                dispatch_packet_t *pkt) {
-  // dispatch packet
-  signal_create(1, 0, NULL, (signal_t *)&pkt->completion_signal);
-  signal_create(0, 0, NULL, (signal_t *)q->doorbell_vaddr);
-  signal_store_release((signal_t *)q->doorbell_vaddr, doorbell);
+hsa_status_t air_queue_dispatch(hsa_agent_t *agent, hsa_queue_t *q, uint64_t doorbell,
+                                hsa_agent_dispatch_packet_t *pkt) {
+
+  // Creating a completion signal for the packet with the agent as the consumer
+  hsa_status_t ret = hsa_amd_signal_create(1, 1, agent, 0, &pkt->completion_signal);
+  if(ret != HSA_STATUS_SUCCESS) {
+    return HSA_STATUS_ERROR;
+  }
+
+  // Ringing the doorbell
+  hsa_signal_store_relaxed(q->doorbell_signal, doorbell);
+
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_queue_wait(queue_t *q, dispatch_packet_t *pkt) {
+hsa_status_t air_queue_wait(hsa_queue_t *q, hsa_agent_dispatch_packet_t *pkt) {
   // wait for packet completion
-  while (signal_wait_acquire((signal_t *)&pkt->completion_signal,
+  while (hsa_signal_wait_scacquire(pkt->completion_signal,
                              HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
                              HSA_WAIT_STATE_ACTIVE) != 0) {
     printf("packet completion signal timeout!\n");
     printf("%x\n", pkt->header);
     printf("%x\n", pkt->type);
-    printf("%x\n", (unsigned)pkt->completion_signal);
+    printf("%lx\n", pkt->completion_signal.handle);
   }
+
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_queue_dispatch_and_wait(queue_t *q, uint64_t doorbell,
-                                         dispatch_packet_t *pkt) {
-  // dispatch packet
-  signal_create(1, 0, NULL, (signal_t *)&pkt->completion_signal);
-  signal_create(0, 0, NULL, (signal_t *)q->doorbell_vaddr);
-  signal_store_release((signal_t *)q->doorbell_vaddr, doorbell);
+hsa_status_t air_queue_dispatch_and_wait(hsa_agent_t *agent, hsa_queue_t *q, uint64_t doorbell,
+                                         hsa_agent_dispatch_packet_t *pkt) {
+
+  // Creating a completion signal for the packet with the agent as the consumer
+  hsa_status_t ret = hsa_amd_signal_create(1, 1, agent, 0, &pkt->completion_signal);
+  if(ret != HSA_STATUS_SUCCESS) {
+    return HSA_STATUS_ERROR;
+  }
+
+  // Ringing the doorbell
+  hsa_signal_store_relaxed(q->doorbell_signal, doorbell);
 
   // wait for packet completion
-  while (signal_wait_acquire((signal_t *)&pkt->completion_signal,
+  while (hsa_signal_wait_scacquire(pkt->completion_signal,
                              HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
                              HSA_WAIT_STATE_ACTIVE) != 0) {
     printf("packet completion signal timeout!\n");
     printf("%x\n", pkt->header);
     printf("%x\n", pkt->type);
-    printf("%x\n", (unsigned)pkt->completion_signal);
+    printf("%lx\n", pkt->completion_signal.handle);
   }
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_herd_init(dispatch_packet_t *pkt, uint16_t herd_id,
+hsa_status_t air_packet_herd_init(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                   uint8_t start_col, uint8_t num_cols,
                                   uint8_t start_row, uint8_t num_rows) {
   // uint8_t start_row, uint8_t num_rows,
   // uint16_t dma0, uint16_t dma1) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = 0;
   pkt->arg[0] |= (AIR_ADDRESS_ABSOLUTE_RANGE << 48);
@@ -224,8 +243,8 @@ hsa_status_t air_packet_herd_init(dispatch_packet_t *pkt, uint16_t herd_id,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_device_init(dispatch_packet_t *pkt, uint32_t num_cols) {
-  initialize_packet(pkt);
+hsa_status_t air_packet_device_init(hsa_agent_dispatch_packet_t *pkt, uint32_t num_cols) {
+  //initialize_packet(pkt);
 
   pkt->arg[0] = 0;
   pkt->arg[0] |= (AIR_ADDRESS_ABSOLUTE_RANGE << 48);
@@ -237,9 +256,11 @@ hsa_status_t air_packet_device_init(dispatch_packet_t *pkt, uint32_t num_cols) {
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_get_capabilities(dispatch_packet_t *pkt,
+/*
+TODO: Integrate with HSA
+hsa_status_t air_packet_get_capabilities(hsa_agent_dispatch_packet_t *pkt,
                                          uint64_t return_address) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->return_address = return_address;
 
@@ -247,10 +268,9 @@ hsa_status_t air_packet_get_capabilities(dispatch_packet_t *pkt,
   pkt->header = (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
 
   return HSA_STATUS_SUCCESS;
-}
+}*/
 
-hsa_status_t air_packet_hello(dispatch_packet_t *pkt, uint64_t value) {
-  initialize_packet(pkt);
+hsa_status_t air_packet_hello(hsa_agent_dispatch_packet_t *pkt, uint64_t value) {
 
   pkt->arg[0] = value;
 
@@ -260,12 +280,12 @@ hsa_status_t air_packet_hello(dispatch_packet_t *pkt, uint64_t value) {
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_post_rdma_wqe(dispatch_packet_t *pkt,
+hsa_status_t air_packet_post_rdma_wqe(hsa_agent_dispatch_packet_t *pkt,
                                       uint64_t remote_vaddr,
                                       uint64_t local_paddr, uint32_t length,
                                       uint8_t op, uint8_t key, uint8_t qpid,
                                       uint8_t ernic_sel) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   // Creating the arguments localy and then writing over PCIe
   uint64_t arg2 = ((uint64_t)ernic_sel << 56) | ((uint64_t)qpid << 48) |
@@ -282,10 +302,10 @@ hsa_status_t air_packet_post_rdma_wqe(dispatch_packet_t *pkt,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_post_rdma_recv(dispatch_packet_t *pkt,
+hsa_status_t air_packet_post_rdma_recv(hsa_agent_dispatch_packet_t *pkt,
                                        uint64_t local_paddr, uint32_t length,
                                        uint8_t qpid, uint8_t ernic_sel) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   // Creating the arguments localy and then writing over PCIe
   uint64_t arg1 =
@@ -300,9 +320,9 @@ hsa_status_t air_packet_post_rdma_recv(dispatch_packet_t *pkt,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_tile_status(dispatch_packet_t *pkt, uint8_t col,
+hsa_status_t air_packet_tile_status(hsa_agent_dispatch_packet_t *pkt, uint8_t col,
                                     uint8_t row) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = col;
   pkt->arg[1] = row;
@@ -313,9 +333,9 @@ hsa_status_t air_packet_tile_status(dispatch_packet_t *pkt, uint8_t col,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_dma_status(dispatch_packet_t *pkt, uint8_t col,
+hsa_status_t air_packet_dma_status(hsa_agent_dispatch_packet_t *pkt, uint8_t col,
                                    uint8_t row) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = col;
   pkt->arg[1] = row;
@@ -326,8 +346,8 @@ hsa_status_t air_packet_dma_status(dispatch_packet_t *pkt, uint8_t col,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_shimdma_status(dispatch_packet_t *pkt, uint8_t col) {
-  initialize_packet(pkt);
+hsa_status_t air_packet_shimdma_status(hsa_agent_dispatch_packet_t *pkt, uint8_t col) {
+  //initialize_packet(pkt);
 
   pkt->arg[0] = col;
   pkt->arg[1] = 0;
@@ -338,9 +358,9 @@ hsa_status_t air_packet_shimdma_status(dispatch_packet_t *pkt, uint8_t col) {
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_put_stream(dispatch_packet_t *pkt, uint64_t stream,
+hsa_status_t air_packet_put_stream(hsa_agent_dispatch_packet_t *pkt, uint64_t stream,
                                    uint64_t value) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = stream;
   pkt->arg[1] = value;
@@ -351,9 +371,11 @@ hsa_status_t air_packet_put_stream(dispatch_packet_t *pkt, uint64_t stream,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_get_stream(dispatch_packet_t *pkt, uint64_t stream,
+/*
+TODO: Integrate with HSA
+hsa_status_t air_packet_get_stream(hsa_agent_dispatch_packet_t *pkt, uint64_t stream,
                                    uint64_t return_address) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = stream;
   pkt->return_address = return_address;
@@ -362,11 +384,11 @@ hsa_status_t air_packet_get_stream(dispatch_packet_t *pkt, uint64_t stream,
   pkt->header = (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
 
   return HSA_STATUS_SUCCESS;
-}
+}*/
 
-hsa_status_t air_packet_l2_dma(dispatch_packet_t *pkt, uint64_t stream,
+hsa_status_t air_packet_l2_dma(hsa_agent_dispatch_packet_t *pkt, uint64_t stream,
                                l2_dma_cmd_t cmd) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = stream;
   pkt->arg[1] = 0;
@@ -381,8 +403,8 @@ hsa_status_t air_packet_l2_dma(dispatch_packet_t *pkt, uint64_t stream,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_program_firmware(dispatch_packet_t *pkt, uint64_t phys_addr, uint32_t file_num_lines) {
-  initialize_packet(pkt);
+hsa_status_t air_program_firmware(hsa_agent_dispatch_packet_t *pkt, uint64_t phys_addr, uint32_t file_num_lines) {
+  //initialize_packet(pkt);
 
   pkt->arg[0] = phys_addr;
   pkt->arg[1] = (uint64_t)file_num_lines;
@@ -393,9 +415,9 @@ hsa_status_t air_program_firmware(dispatch_packet_t *pkt, uint64_t phys_addr, ui
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_cdma_configure(dispatch_packet_t *pkt, uint64_t dest,
+hsa_status_t air_packet_cdma_configure(hsa_agent_dispatch_packet_t *pkt, uint64_t dest,
                                        uint64_t source, uint32_t length) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = dest;   // Destination (BD for SG mode)
   pkt->arg[1] = source; // Source (BD for SG mode)
@@ -407,9 +429,9 @@ hsa_status_t air_packet_cdma_configure(dispatch_packet_t *pkt, uint64_t dest,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_cdma_memcpy(dispatch_packet_t *pkt, uint64_t dest,
+hsa_status_t air_packet_cdma_memcpy(hsa_agent_dispatch_packet_t *pkt, uint64_t dest,
                                     uint64_t source, uint32_t length) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = dest;   // Destination
   pkt->arg[1] = source; // Source
@@ -421,12 +443,12 @@ hsa_status_t air_packet_cdma_memcpy(dispatch_packet_t *pkt, uint64_t dest,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_aie_lock_range(dispatch_packet_t *pkt, uint16_t herd_id,
+hsa_status_t air_packet_aie_lock_range(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                        uint64_t lock_id, uint64_t acq_rel,
                                        uint64_t value, uint8_t start_col,
                                        uint8_t num_cols, uint8_t start_row,
                                        uint8_t num_rows) {
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = 0;
   pkt->arg[0] |= (AIR_ADDRESS_HERD_RELATIVE_RANGE << 48);
@@ -445,7 +467,7 @@ hsa_status_t air_packet_aie_lock_range(dispatch_packet_t *pkt, uint16_t herd_id,
 }
 
 hsa_status_t
-air_packet_nd_memcpy(dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
+air_packet_nd_memcpy(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
                      uint8_t direction, uint8_t channel, uint8_t burst_len,
                      uint8_t memory_space, uint64_t phys_addr,
                      uint32_t transfer_length1d, uint32_t transfer_length2d,
@@ -453,7 +475,7 @@ air_packet_nd_memcpy(dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
                      uint32_t transfer_stride3d, uint32_t transfer_length4d,
                      uint32_t transfer_stride4d) {
 
-  initialize_packet(pkt);
+  //initialize_packet(pkt);
 
   pkt->arg[0] = 0;
   pkt->arg[0] |= ((uint64_t)memory_space) << 16;
@@ -477,14 +499,16 @@ air_packet_nd_memcpy(dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_packet_aie_lock(dispatch_packet_t *pkt, uint16_t herd_id,
+hsa_status_t air_packet_aie_lock(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                  uint64_t lock_id, uint64_t acq_rel,
                                  uint64_t value, uint8_t col, uint8_t row) {
   return air_packet_aie_lock_range(pkt, herd_id, lock_id, acq_rel, value, col,
                                    1, row, 1);
 }
 
-hsa_status_t air_packet_barrier_and(barrier_and_packet_t *pkt,
+/*
+TODO: Integrate into HSA
+hsa_status_t air_packet_barrier_and(hsa_barrier_and_packet_t *pkt,
                                     uint64_t dep_signal0, uint64_t dep_signal1,
                                     uint64_t dep_signal2, uint64_t dep_signal3,
                                     uint64_t dep_signal4) {
@@ -498,9 +522,11 @@ hsa_status_t air_packet_barrier_and(barrier_and_packet_t *pkt,
   pkt->header = (HSA_PACKET_TYPE_BARRIER_AND << HSA_PACKET_HEADER_TYPE);
 
   return HSA_STATUS_SUCCESS;
-}
+}*/
 
-hsa_status_t air_packet_barrier_or(barrier_or_packet_t *pkt,
+/*
+TODO: Integrate into HSA
+hsa_status_t air_packet_barrier_or(hsa_barrier_or_packet_t *pkt,
                                    uint64_t dep_signal0, uint64_t dep_signal1,
                                    uint64_t dep_signal2, uint64_t dep_signal3,
                                    uint64_t dep_signal4) {
@@ -514,4 +540,4 @@ hsa_status_t air_packet_barrier_or(barrier_or_packet_t *pkt,
   pkt->header = (HSA_PACKET_TYPE_BARRIER_OR << HSA_PACKET_HEADER_TYPE);
 
   return HSA_STATUS_SUCCESS;
-}
+}*/

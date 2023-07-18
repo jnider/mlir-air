@@ -10,6 +10,7 @@
 #include "air_host_impl.h"
 #include "pcie-ernic.h"
 #include "amdair_ioctl.h"
+#include "air.hpp"
 
 #include <cassert>
 #include <cstdio>
@@ -243,7 +244,7 @@ static int64_t shim_channel_data(air_herd_shim_desc_t *sd, int i, int j,
 
 template <typename T, int R>
 static void air_mem_shim_nd_memcpy_queue_impl(
-    signal_t *s, uint32_t id, uint64_t x, uint64_t y, tensor_t<T, R> *t,
+    hsa_signal_t *s, uint32_t id, uint64_t x, uint64_t y, tensor_t<T, R> *t,
     uint32_t space, uint64_t offset_3, uint64_t offset_2, uint64_t offset_1,
     uint64_t offset_0, uint64_t length_4d, uint64_t length_3d,
     uint64_t length_2d, uint64_t length_1d, uint64_t stride_4d,
@@ -252,6 +253,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
          "cannot shim memcpy without active herd");
   assert(_air_host_active_herd.q &&
          "cannot shim memcpy using a queue without active queue");
+  assert(_air_host_active_herd.agent &&
+         "cannot shim memcpy using an agent without an active agent");
 
   auto shim_desc = _air_host_active_herd.herd_desc->shim_desc;
   auto shim_col = shim_location_data(shim_desc, id - 1, x, y);
@@ -294,25 +297,23 @@ static void air_mem_shim_nd_memcpy_queue_impl(
       stride *= t->shape[R - i - 1];
     }
 
-    uint64_t wr_idx = queue_add_write_index(_air_host_active_herd.q, 1);
+    uint64_t wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
     uint64_t packet_id = wr_idx % _air_host_active_herd.q->size;
 
-    dispatch_packet_t *pkt =
-        (dispatch_packet_t *)(_air_host_active_herd.q->base_address_vaddr) +
-        packet_id;
+    hsa_agent_dispatch_packet_t pkt;
+
     air_packet_nd_memcpy(
-        pkt, /*herd_id=*/0, shim_col, /*direction=*/isMM2S, shim_chan,
+        &pkt, /*herd_id=*/0, shim_col, /*direction=*/isMM2S, shim_chan,
         /*burst_len=*/4, /*memory_space=*/space, (uint64_t)t->data + offset,
         length_1d * sizeof(T), length_2d, stride_2d * sizeof(T), length_3d,
         stride_3d * sizeof(T), length_4d, stride_4d * sizeof(T));
+
+    air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &pkt);
     if (s) {
-      air_queue_dispatch(_air_host_active_herd.q, wr_idx, pkt);
-      uint64_t signal_offset = offsetof(dispatch_packet_t, completion_signal);
-      s->handle = queue_paddr_from_index(
-          _air_host_active_herd.q,
-          (packet_id) * sizeof(dispatch_packet_t) + signal_offset);
+      pkt.completion_signal = *s;
+      air_queue_dispatch(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &pkt);
     } else {
-      air_queue_dispatch_and_wait(_air_host_active_herd.q, wr_idx, pkt);
+      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &pkt);
     }
     return;
   } else {
@@ -360,7 +361,7 @@ static void air_mem_shim_nd_memcpy_queue_impl(
     uint64_t paddr_1d = p;
 
     uint64_t wr_idx, packet_id;
-    dispatch_packet_t *pkt;
+    hsa_agent_dispatch_packet_t rdma_read_pkt;
 
     if (isMM2S) {
       shim_chan = shim_chan - 2;
@@ -374,10 +375,9 @@ static void air_mem_shim_nd_memcpy_queue_impl(
               memcpy((size_t*)bounce_buffer, (size_t*)paddr_1d, length_1d*sizeof(T));
             }
             else {
-              wr_idx = queue_add_write_index(_air_host_active_herd.q, 1);
+              wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
               packet_id = wr_idx % _air_host_active_herd.q->size;
-              pkt = (dispatch_packet_t*)(_air_host_active_herd.q->base_address_vaddr) + packet_id;
-              air_packet_post_rdma_wqe(pkt,
+              air_packet_post_rdma_wqe(&rdma_read_pkt,
                                       (uint64_t)paddr_1d,
                                       (uint64_t)bounce_buffer_pa,
                                       (uint32_t)length_1d*sizeof(T),
@@ -385,7 +385,9 @@ static void air_mem_shim_nd_memcpy_queue_impl(
                                       (uint8_t)rdma_entry->rkey,
                                       (uint8_t)rdma_entry->qp,
                                       (uint8_t)0);
-              air_queue_dispatch_and_wait(_air_host_active_herd.q, wr_idx, pkt);
+
+              air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &rdma_read_pkt);
+              air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &rdma_read_pkt);
             }
 
             // Update physical address of the bounce buffer we are writing to
@@ -402,22 +404,19 @@ static void air_mem_shim_nd_memcpy_queue_impl(
       }
     }
 
-    wr_idx = queue_add_write_index(_air_host_active_herd.q, 1);
+    wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
     packet_id = wr_idx % _air_host_active_herd.q->size;
-
-    pkt = (dispatch_packet_t*)(_air_host_active_herd.q->base_address_vaddr) + packet_id;
-    air_packet_nd_memcpy(pkt, /*herd_id=*/0, shim_col, /*direction=*/isMM2S, shim_chan, /*burst_len=*/4, /*memory_space=*/2,
+    hsa_agent_dispatch_packet_t memcpy_pkt;
+    air_packet_nd_memcpy(&memcpy_pkt, /*herd_id=*/0, shim_col, /*direction=*/isMM2S, shim_chan, /*burst_len=*/4, /*memory_space=*/2,
                          _air_host_bram_paddr, length*sizeof(T), 1, 0, 1, 0, 1, 0);
 
+    air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &memcpy_pkt);
+
     if (s) {
-      // TODO: don't block here
-      air_queue_dispatch_and_wait(_air_host_active_herd.q, wr_idx, pkt);
-      uint64_t signal_offset = offsetof(dispatch_packet_t, completion_signal);
-      s->handle = queue_paddr_from_index(
-          _air_host_active_herd.q,
-          (packet_id) * sizeof(dispatch_packet_t) + signal_offset);
+      memcpy_pkt.completion_signal = *s;
+      air_queue_dispatch(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &memcpy_pkt);
     } else {
-      air_queue_dispatch_and_wait(_air_host_active_herd.q, wr_idx, pkt);
+      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &memcpy_pkt);
     }
     if (!isMM2S) {
       for (uint32_t index_4d = 0; index_4d < length_4d; index_4d++) {
@@ -430,10 +429,11 @@ static void air_mem_shim_nd_memcpy_queue_impl(
               memcpy((size_t*)paddr_1d, (size_t*)bounce_buffer, length_1d*sizeof(T));
             }
             else {
-              wr_idx = queue_add_write_index(_air_host_active_herd.q, 1);
+              wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
               packet_id = wr_idx % _air_host_active_herd.q->size;
-              pkt = (dispatch_packet_t*)(_air_host_active_herd.q->base_address_vaddr) + packet_id;
-              air_packet_post_rdma_wqe(pkt,
+              hsa_agent_dispatch_packet_t rdma_write_pkt;
+
+              air_packet_post_rdma_wqe(&rdma_write_pkt,
                                       (uint64_t)paddr_1d,
                                       (uint64_t)bounce_buffer_pa,
                                       (uint32_t)length_1d*sizeof(T),
@@ -442,7 +442,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
                                       (uint8_t)rdma_entry->qp,
                                       (uint8_t)0);
 
-              air_queue_dispatch_and_wait(_air_host_active_herd.q, wr_idx, pkt);
+              air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &rdma_write_pkt);
+              air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &rdma_write_pkt);
             }
 
             bounce_buffer_pa += length_1d * sizeof(T);
@@ -462,7 +463,7 @@ static void air_mem_shim_nd_memcpy_queue_impl(
 
 #define mlir_air_dma_nd_memcpy(mangle, rank, space, type)                      \
   void _mlir_ciface___airrt_dma_nd_memcpy_##mangle(                            \
-      signal_t *s, uint32_t id, uint64_t x, uint64_t y, void *t,               \
+      hsa_signal_t *s, uint32_t id, uint64_t x, uint64_t y, void *t,               \
       uint64_t offset_3, uint64_t offset_2, uint64_t offset_1,                 \
       uint64_t offset_0, uint64_t length_3, uint64_t length_2,                 \
       uint64_t length_1, uint64_t length_0, uint64_t stride_2,                 \

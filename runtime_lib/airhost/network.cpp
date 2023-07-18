@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #include "air_host.h"
+#include "air.hpp"
 #include "pcie-ernic.h"
 
 #define QP_DEPTH 0x01000100
@@ -261,8 +262,8 @@ tensor t. We then send a synchronizing SEND back to remote agent. This
 function is capable of performing a non-blocking SEND by passing an
 HSA signal as a handle*/
 void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
-              uint32_t offset, uint32_t src_rank, queue_t *q,
-              uint8_t ernic_sel) {
+              uint32_t offset, uint32_t src_rank, hsa_agent_t *agent,
+              hsa_queue_t *q, uint8_t ernic_sel) {
 
 #ifdef VERBOSE_DEBUG
   printf("Called air_recv(%p, %p, 0x%x, 0x%x, 0x%x\n", s, t, size, offset,
@@ -314,7 +315,6 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
     uint32_t amount_data_left = size;
 
     uint64_t wr_idx, packet_id;
-    dispatch_packet_t *pkt;
     uint32_t rqe_offset = 0;
     while (amount_data_left > 0) {
 
@@ -326,10 +326,11 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
         amount_data_to_recv = amount_data_left;
       }
 
-      wr_idx = queue_add_write_index(q, 1);
+      wr_idx = hsa_queue_add_write_index_relaxed(q, 1);
       packet_id = wr_idx % q->size;
-      pkt = (dispatch_packet_t *)(q->base_address_vaddr) + packet_id;
-      air_packet_post_rdma_recv(pkt, // HSA Packet
+      hsa_agent_dispatch_packet_t recv_pkt;
+
+      air_packet_post_rdma_recv(&recv_pkt, // HSA Packet
                                 rdma_entry->local_buff->pa + rqe_offset +
                                     offset,          // Local PADDR
                                 amount_data_to_recv, // Length
@@ -338,11 +339,12 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
 
       // Need to do this because otherwise the runtime will complain the packet
       // is timing out but it is supposed to be blocking
-      air_queue_dispatch(q, wr_idx, pkt);
-      while (signal_wait_acquire((signal_t *)&pkt->completion_signal,
+      air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &recv_pkt);
+      air_queue_dispatch(agent, q, wr_idx, &recv_pkt);
+
+      while (hsa_signal_wait_scacquire(recv_pkt.completion_signal,
                                  HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
-                                 HSA_WAIT_STATE_ACTIVE) != 0)
-        ;
+                                 HSA_WAIT_STATE_ACTIVE) != 0);
 
       // Calculating how much data we have to receive now and the new offset
       amount_data_left -= amount_data_to_recv;
@@ -350,11 +352,11 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
     }
 
     // Sending a synchronizing SEND so the corresponding air_send() can complete
-    wr_idx = queue_add_write_index(q, 1);
+    wr_idx = hsa_queue_add_write_index_relaxed(q, 1);
     packet_id = wr_idx % q->size;
-    pkt = (dispatch_packet_t *)(q->base_address_vaddr) + packet_id;
+    hsa_agent_dispatch_packet_t sync_send_pkt;
     air_packet_post_rdma_wqe(
-        pkt,                        // HSA Packet
+        &sync_send_pkt,              // HSA Packet
         0,                          // Remote VADDR
         rdma_entry->local_buff->pa, // Local PADDR -- Once 0 length SENDs are
                                     // working we can just make this 0
@@ -364,7 +366,10 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
         0,                // Key
         (uint8_t)qpid,    // QPID
         ernic_sel);       // ERNIC select
-    air_queue_dispatch_and_wait(q, wr_idx, pkt);
+
+
+    air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &sync_send_pkt);
+    air_queue_dispatch_and_wait(agent, q, wr_idx, &sync_send_pkt);
   }
 }
 
@@ -375,8 +380,8 @@ We then send a synchronizing SEND back to remote agent. This
 function is capable of performing a non-blocking SEND by 
 passing an HSA signal as a handle */
 void air_send(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
-              uint32_t offset, uint32_t dst_rank, queue_t *q,
-              uint8_t ernic_sel) {
+              uint32_t offset, uint32_t dst_rank, hsa_agent_t *agent,
+              hsa_queue_t *q, uint8_t ernic_sel) {
 
 #ifdef VERBOSE_DEBUG
   printf("Called air_send(%p, %p, 0x%x, 0x%x\n", s, t, size, dst_rank);
@@ -427,14 +432,13 @@ void air_send(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
     uint32_t num_rqes = ceil((float)size / RQE_SIZE);
 
     uint64_t wr_idx, packet_id;
-    dispatch_packet_t *pkt;
     uint32_t rqe_offset = 0;
     for (int i = 0; i < num_rqes; i++) {
-      wr_idx = queue_add_write_index(q, 1);
+      wr_idx = hsa_queue_add_write_index_relaxed(q, 1);
       packet_id = wr_idx % q->size;
-      pkt = (dispatch_packet_t *)(q->base_address_vaddr) + packet_id;
+      hsa_agent_dispatch_packet_t send_pkt;
       air_packet_post_rdma_wqe(
-          pkt,                                              // HSA Packet
+          &send_pkt,                                         // HSA Packet
           0,                                                // Remote VADDR
           rdma_entry->local_buff->pa + rqe_offset + offset, // Local PADDR
           0x00000100, // Length -- Need to send RQE size elements, receive side
@@ -443,14 +447,17 @@ void air_send(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
           0,                // Key
           (uint8_t)qpid,    // QPID
           ernic_sel);       // ERNIC select
-      air_queue_dispatch_and_wait(q, wr_idx, pkt);
+
+      air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &send_pkt);
+      air_queue_dispatch_and_wait(agent, q, wr_idx, &send_pkt);
     }
 
-    wr_idx = queue_add_write_index(q, 1);
+    wr_idx = hsa_queue_add_write_index_relaxed(q, 1);
     packet_id = wr_idx % q->size;
-    pkt = (dispatch_packet_t *)(q->base_address_vaddr) + packet_id;
+    hsa_agent_dispatch_packet_t recv_pkt;
+
     air_packet_post_rdma_recv(
-        pkt,                        // HSA Packet
+        &recv_pkt,                   // HSA Packet
         rdma_entry->local_buff->pa, // Local PADDR
         0, // Length - Synchronizing so don't want to copy any of the data over
         (uint8_t)qpid, // QPID
@@ -458,12 +465,13 @@ void air_send(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
 
     // Need to do this because otherwise the runtime will complain the packet is
     // timing out but it is supposed to be blocking
-    air_queue_dispatch(q, wr_idx, pkt);
-    while (signal_wait_acquire((signal_t *)&pkt->completion_signal,
-                               HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
-                               HSA_WAIT_STATE_ACTIVE) != 0)
-      ;
-  }
+    air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &recv_pkt);
+    air_queue_dispatch(agent, q, wr_idx, &recv_pkt);
+    while (hsa_signal_wait_scacquire(recv_pkt.completion_signal,
+                                 HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
+                                 HSA_WAIT_STATE_ACTIVE) != 0);
+
+     }
 }
 
 /* Provides a very simplistic barrier for remote AIR instances. 
@@ -471,7 +479,7 @@ This barrier uses rank 0 as the coordinater, which receives an
 incoming send from every non-zero rank AIR instance. Then, 
 it perform an air_send to every non-zero rank AIR instance 
 which allows them to proceed. */
-void air_barrier(tensor_t<uint32_t, 1> *dummy_tensor, queue_t *q,
+void air_barrier(tensor_t<uint32_t, 1> *dummy_tensor, hsa_agent_t *agent, hsa_queue_t *q,
                  uint8_t ernic_sel) {
 
   // Get my own rank
@@ -501,16 +509,16 @@ void air_barrier(tensor_t<uint32_t, 1> *dummy_tensor, queue_t *q,
   if (my_rank == 0) {
     // Waiting for everyone to hit the barrier
     for (int i = 1; i < world_size; i++) {
-      air_recv(NULL, dummy_tensor, RQE_SIZE, 0, i, q, ernic_sel);
+      air_recv(NULL, dummy_tensor, RQE_SIZE, 0, i, agent, q, ernic_sel);
     }
 
     // Notifying everyone that they can continue
     for (int i = 1; i < world_size; i++) {
-      air_send(NULL, dummy_tensor, RQE_SIZE, 0, i, q, ernic_sel);
+      air_send(NULL, dummy_tensor, RQE_SIZE, 0, i, agent, q, ernic_sel);
     }
   } else {
     // Perform a send() then recv() to rank 0
-    air_send(NULL, dummy_tensor, RQE_SIZE, 0, 0, q, ernic_sel);
-    air_recv(NULL, dummy_tensor, RQE_SIZE, 0, 0, q, ernic_sel);
+    air_send(NULL, dummy_tensor, RQE_SIZE, 0, 0, agent, q, ernic_sel);
+    air_recv(NULL, dummy_tensor, RQE_SIZE, 0, 0, agent, q, ernic_sel);
   }
 }

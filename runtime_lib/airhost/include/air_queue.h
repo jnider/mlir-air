@@ -9,7 +9,7 @@
 #ifndef ACDC_QUEUE_H
 #define ACDC_QUEUE_H
 
-#include "hsa_defs.h"
+#include "hsa/hsa.h"
 
 #include <stdint.h>
 

@@ -13,6 +13,15 @@
 #include <stdint.h>
 #include <vector>
 
+template<typename T>
+inline void air_write_pkt(hsa_queue_t *q, uint32_t packet_id, T *pkt) {
+  reinterpret_cast<T*>(q->base_address)[packet_id] = *pkt;
+}
+
+inline hsa_status_t air_get_agents(std::vector<hsa_agent_t> &agents) {
+  return hsa_iterate_agents(find_aie, (void *)&agents);
+}
+
 inline hsa_status_t air_get_agents(std::vector<air_agent_t> &agents) {
   return air_iterate_agents(
       [](air_agent_t a, void *d) {
@@ -22,6 +31,8 @@ inline hsa_status_t air_get_agents(std::vector<air_agent_t> &agents) {
       },
       (void *)&agents);
 }
+
+
 
 uint64_t air_wait_all(std::vector<uint64_t> &signals);
 

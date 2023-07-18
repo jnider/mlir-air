@@ -144,7 +144,7 @@ class LinalgOnTensorsAirBackend(AirBackend):
         airrt.host.init()
         a = airrt.host.get_agents()
         q = airrt.host.queue_create(a[0])
-        self.handle = airrt.host.module_load_from_file("./torch.mlir.so", q)
+        self.handle = airrt.host.module_load_from_file("./torch.mlir.so", a, q)
         return self.refbackend.load(module)
 
     def unload(self):

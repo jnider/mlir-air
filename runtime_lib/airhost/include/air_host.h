@@ -12,10 +12,11 @@
 #include "air_network.h"
 #include "air_queue.h"
 #include "air_tensor.h"
-#include "hsa_defs.h"
+#include "hsa/hsa.h"
 
 #include <stdlib.h>
 #include <string>
+#include <vector>
 
 extern "C" {
 
@@ -60,7 +61,7 @@ typedef struct air_agent_s {
 hsa_status_t air_iterate_agents(hsa_status_t (*callback)(air_agent_t agent,
                                                          void *data),
                                 void *data);
-hsa_status_t air_get_agent_info(queue_t *queue, air_agent_info_t attribute,
+hsa_status_t air_get_agent_info(hsa_queue_t *queue, air_agent_info_t attribute,
                                 void *data);
 
 #ifdef AIR_PCIE
@@ -105,11 +106,11 @@ uint64_t air_mem_get_paddr(void *vaddr);
 hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
                               uint64_t paddr, uint32_t device_id = 0);
 
-hsa_status_t air_queue_dispatch(queue_t *queue, uint64_t doorbell,
-                                dispatch_packet_t *pkt);
-hsa_status_t air_queue_wait(queue_t *queue, dispatch_packet_t *pkt);
-hsa_status_t air_queue_dispatch_and_wait(queue_t *queue, uint64_t doorbell,
-                                         dispatch_packet_t *pkt);
+hsa_status_t air_queue_dispatch(hsa_agent_t *agent, hsa_queue_t *queue, uint64_t doorbell,
+                                hsa_agent_dispatch_packet_t *pkt);
+hsa_status_t air_queue_wait(hsa_queue_t *queue, hsa_agent_dispatch_packet_t *pkt);
+hsa_status_t air_queue_dispatch_and_wait(hsa_agent_t *agent, hsa_queue_t *queue, uint64_t doorbell,
+                                         hsa_agent_dispatch_packet_t *pkt);
 
 // packet utilities
 //
@@ -126,62 +127,62 @@ struct l2_dma_rsp_t {
 };
 
 // initialize pkt as a herd init packet with given parameters
-hsa_status_t air_packet_herd_init(dispatch_packet_t *pkt, uint16_t herd_id,
+hsa_status_t air_packet_herd_init(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                   uint8_t start_col, uint8_t num_cols,
                                   uint8_t start_row, uint8_t num_rows);
 // uint8_t start_row, uint8_t num_rows,
 // uint16_t dma0, uint16_t dma1);
 
-hsa_status_t air_packet_device_init(dispatch_packet_t *pkt, uint32_t num_cols);
+hsa_status_t air_packet_device_init(hsa_agent_dispatch_packet_t *pkt, uint32_t num_cols);
 
-hsa_status_t air_packet_get_capabilities(dispatch_packet_t *pkt,
+hsa_status_t air_packet_get_capabilities(hsa_agent_dispatch_packet_t *pkt,
                                          uint64_t return_address);
 
-hsa_status_t air_packet_hello(dispatch_packet_t *pkt, uint64_t value);
+hsa_status_t air_packet_hello(hsa_agent_dispatch_packet_t *pkt, uint64_t value);
 
 // RDMA operations for the AIR Scale out platform
-hsa_status_t air_packet_post_rdma_wqe(dispatch_packet_t *pkt,
+hsa_status_t air_packet_post_rdma_wqe(hsa_agent_dispatch_packet_t *pkt,
                                       uint64_t remote_vaddr,
                                       uint64_t local_paddr, uint32_t length,
                                       uint8_t op, uint8_t key, uint8_t qpid,
                                       uint8_t ernic_sel);
-hsa_status_t air_packet_post_rdma_recv(dispatch_packet_t *pkt,
+hsa_status_t air_packet_post_rdma_recv(hsa_agent_dispatch_packet_t *pkt,
                                        uint64_t local_paddr, uint32_t length,
                                        uint8_t qpid, uint8_t ernic_sel);
 
-hsa_status_t air_packet_put_stream(dispatch_packet_t *pkt, uint64_t stream,
+hsa_status_t air_packet_put_stream(hsa_agent_dispatch_packet_t *pkt, uint64_t stream,
                                    uint64_t value);
-hsa_status_t air_packet_get_stream(dispatch_packet_t *pkt, uint64_t stream);
+hsa_status_t air_packet_get_stream(hsa_agent_dispatch_packet_t *pkt, uint64_t stream);
 
-hsa_status_t air_packet_l2_dma(dispatch_packet_t *pkt, uint64_t stream,
+hsa_status_t air_packet_l2_dma(hsa_agent_dispatch_packet_t *pkt, uint64_t stream,
                                l2_dma_cmd_t cmd);
 
-hsa_status_t air_program_firmware(dispatch_packet_t *pkt, uint64_t phys_addr, uint32_t file_num_lines);
+hsa_status_t air_program_firmware(hsa_agent_dispatch_packet_t *pkt, uint64_t phys_addr, uint32_t file_num_lines);
 
-hsa_status_t air_packet_cdma_memcpy(dispatch_packet_t *pkt, uint64_t dest,
+hsa_status_t air_packet_cdma_memcpy(hsa_agent_dispatch_packet_t *pkt, uint64_t dest,
                                     uint64_t source, uint32_t length);
 
-hsa_status_t air_packet_cdma_configure(dispatch_packet_t *pkt, uint64_t dest,
+hsa_status_t air_packet_cdma_configure(hsa_agent_dispatch_packet_t *pkt, uint64_t dest,
                                        uint64_t source, uint32_t length);
 
-hsa_status_t air_packet_aie_lock_range(dispatch_packet_t *pkt, uint16_t herd_id,
+hsa_status_t air_packet_aie_lock_range(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                        uint64_t lock_id, uint64_t acq_rel,
                                        uint64_t value, uint8_t start_col,
                                        uint8_t num_cols, uint8_t start_row,
                                        uint8_t num_rows);
 
-hsa_status_t air_packet_aie_lock(dispatch_packet_t *pkt, uint16_t herd_id,
+hsa_status_t air_packet_aie_lock(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                  uint64_t lock_id, uint64_t acq_rel,
                                  uint64_t value, uint8_t col, uint8_t row);
 
-hsa_status_t air_packet_tile_status(dispatch_packet_t *pkt, uint8_t col,
+hsa_status_t air_packet_tile_status(hsa_agent_dispatch_packet_t *pkt, uint8_t col,
                                     uint8_t row);
-hsa_status_t air_packet_dma_status(dispatch_packet_t *pkt, uint8_t col,
+hsa_status_t air_packet_dma_status(hsa_agent_dispatch_packet_t *pkt, uint8_t col,
                                    uint8_t row);
-hsa_status_t air_packet_shimdma_status(dispatch_packet_t *pkt, uint8_t col);
+hsa_status_t air_packet_shimdma_status(hsa_agent_dispatch_packet_t *pkt, uint8_t col);
 
 hsa_status_t
-air_packet_nd_memcpy(dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
+air_packet_nd_memcpy(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
                      uint8_t direction, uint8_t channel, uint8_t burst_len,
                      uint8_t memory_space, uint64_t phys_addr,
                      uint32_t transfer_length1d, uint32_t transfer_length2d,
@@ -189,11 +190,11 @@ air_packet_nd_memcpy(dispatch_packet_t *pkt, uint16_t herd_id, uint8_t col,
                      uint32_t transfer_stride3d, uint32_t transfer_length4d,
                      uint32_t transfer_stride4d);
 
-hsa_status_t air_packet_barrier_and(barrier_and_packet_t *pkt,
+hsa_status_t air_packet_barrier_and(hsa_barrier_and_packet_t *pkt,
                                     uint64_t dep_signal0, uint64_t dep_signal1,
                                     uint64_t dep_signal2, uint64_t dep_signal3,
                                     uint64_t dep_signal4);
-hsa_status_t air_packet_barrier_or(barrier_or_packet_t *pkt,
+hsa_status_t air_packet_barrier_or(hsa_barrier_or_packet_t *pkt,
                                    uint64_t dep_signal0, uint64_t dep_signal1,
                                    uint64_t dep_signal2, uint64_t dep_signal3,
                                    uint64_t dep_signal4);
@@ -213,7 +214,8 @@ struct air_herd_desc_t {
 };
 
 struct air_rt_herd_desc_t {
-  queue_t *q;
+  hsa_queue_t *q;
+  hsa_agent_t *agent;
   air_herd_desc_t *herd_desc;
 };
 
@@ -225,7 +227,8 @@ struct air_segment_desc_t {
 };
 
 struct air_rt_segment_desc_t {
-  queue_t *q;
+  hsa_queue_t *q;
+  hsa_agent_t *agent;
   air_segment_desc_t *segment_desc;
 };
 
@@ -241,7 +244,8 @@ typedef size_t air_module_handle_t;
 
 // return 0 on failure, nonzero otherwise
 air_module_handle_t air_module_load_from_file(const char *filename,
-                                              queue_t *q = 0,
+                                              hsa_agent_t *agent = 0,
+                                              hsa_queue_t *q = 0,
                                               uint32_t device_id = 0);
 
 // return 0 on success, nonzero otherwise
@@ -260,6 +264,9 @@ uint64_t air_segment_load(const char *name);
 
 uint64_t air_herd_load(const char *name);
 }
+
+hsa_status_t find_aie(hsa_agent_t agent, void *data);
+hsa_status_t air_get_agents(std::vector<hsa_agent_t> &agents);
 
 std::string air_get_ddr_bar(uint32_t device_id);
 std::string air_get_aie_bar(uint32_t device_id);

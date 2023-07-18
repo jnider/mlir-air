@@ -95,10 +95,10 @@ sudo cp libxaiengine.so* /opt/aiengine/lib/
 export LD_LIBRARY_PATH=/opt/xaiengine/lib:${LD_LIBRARY_PATH}
 ```
 
-Use the following command to build the AIR tools to compile on x86 for PCIe cards (VCK5000):
+Use the following command to build the AIR tools to compile on x86 for PCIe cards (VCK5000). If using this command exactly, make sure that ${ROCM\_ROOT} is pointing to your ROCM install:
 
 ```
-./utils/build-mlir-air-pcie.sh utils/llvm/ utils/cmakeModules/cmakeModulesXilinx/ utils/mlir-aie/ /opt/xaiengine
+./utils/build-mlir-air-pcie.sh utils/llvm/ utils/cmakeModules/cmakeModulesXilinx/ utils/mlir-aie/ /opt/xaiengine ${ROCM_ROOT}/lib/cmake/hsa-runtime64/ ${ROCM_ROOT}/lib/cmake/hsakmt/
 ```
 
 ## Environment setup
