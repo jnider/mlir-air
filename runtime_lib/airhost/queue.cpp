@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -26,12 +27,6 @@
 #include "hsa/hsa.h"
 
 #define ALIGN(_x, _size) (((_x) + ((_size)-1)) & ~((_size)-1))
-
-// Need access to the physical devices to determine where to
-// write the queue
-#ifdef AIR_PCIE
-extern std::vector<air_physical_device_t> physical_devices;
-#endif
 
 hsa_status_t air_get_agent_info(hsa_agent_t *agent, hsa_queue_t *queue, air_agent_info_t attribute,
                                 void *data) {
@@ -69,56 +64,7 @@ hsa_status_t air_get_agent_info(hsa_agent_t *agent, hsa_queue_t *queue, air_agen
 hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
                               uint64_t paddr, uint32_t device_id) {
 #ifdef AIR_PCIE
-
-  if (device_id >= physical_devices.size()) {
-    printf("[ERROR] No device id %d in system\n", device_id);
-    return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
-  }
-
-  // Right now assuming single device
-  int fd = open(air_get_driver_name(), O_RDWR | O_SYNC);
-  if (fd == -1) {
-    printf("Error opening %s\n", air_get_driver_name());
-    return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
-  }
-
-  printf("Creating queue\n");
-  struct amdair_create_queue_args cq_args = {
-      .ring_size_bytes = MB_QUEUE_SIZE,
-      .device_id = device_id,
-      .queue_type = AMDAIR_QUEUE_DEVICE,
-  };
-
-  /* When creating a queue of type AMDAIR_QUEUE_DEVICE, the driver
-     will allocate a new queue and then map the address directly,
-     returning the mapped address in 'ring_base_address'.
-  */
-  if (ioctl(fd, AMDAIR_IOC_CREATE_QUEUE, &cq_args) == -1) {
-    printf("Kernel error in create queue\n");
-    return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
-  }
-
-  printf("Queue %u created with handle 0x%lu\n", cq_args.queue_id,
-         cq_args.handle);
-
-  uint8_t *herd_ptr =
-      (uint8_t *)mmap(NULL, MB_QUEUE_SIZE * 64, PROT_READ | PROT_WRITE,
-                      MAP_SHARED, fd, cq_args.handle);
-  if (herd_ptr == MAP_FAILED) {
-    struct amdair_destroy_object_args do_args = {
-        .handle = cq_args.handle,
-    };
-    printf("Error mapping queue %u handle=%lu\n", cq_args.queue_id,
-           cq_args.handle);
-    if (ioctl(fd, AMDAIR_IOC_DESTROY_OBJECT, &do_args) == -1)
-      printf("Kernel error while destroying queue\n");
-    return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
-  }
-
-  // calculate the offset for packet memory
-  queue_t *q = (queue_t *)(herd_ptr + sizeof(dispatch_packet_t));
-  q->base_address_vaddr =
-      ALIGN(((uint64_t)q) + sizeof(queue_t), sizeof(dispatch_packet_t));
+  assert(false && "Use hsa_queue_create() for PCIe devices");
 #else
   int fd = open("/dev/mem", O_RDWR | O_SYNC);
   if (fd == -1)
@@ -136,7 +82,6 @@ hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
   queue_t *q = (queue_t *)(((size_t)bram_ptr) + q_offset + paddr_offset);
   // printf("Queue location at paddr: %p vaddr: %p\n",
   // bram_ptr[paddr_offset/sizeof(uint64_t)], q);
-#endif
 
   if (q->id != 0xacdc) {
     printf("%s error invalid id %lx\n", __func__, q->id);
@@ -153,14 +98,12 @@ hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
     return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
   }
 
-#ifdef AIR_PCIE
-#else
   uint64_t base_address_offset = q->base_address - paddr_aligned;
   q->base_address_vaddr = ((size_t)bram_ptr) + base_address_offset;
   q->base_address_paddr = q->base_address;
-#endif
 
   *queue = q;
+#endif
   return HSA_STATUS_SUCCESS;
 }
 

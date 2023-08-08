@@ -196,25 +196,6 @@ For a non-PCIe device, memory map the base address directly.
                device_id) == SYSFS_PATH_MAX)
     sysfs_path[SYSFS_PATH_MAX] = 0;
 
-  int fd;
-  if ((fd = open(vck5000_driver_name, O_RDWR | O_SYNC)) == -1) {
-    printf("[ERROR] %s failed to open %s\n", __func__, vck5000_driver_name);
-    return (air_libxaie_ctx_t) nullptr;
-  }
-
-  // create a handle to the AIE memory region
-  struct amdair_create_mr_args mr_args = {
-      .region = AMDAIR_MEM_RANGE_AIE,
-      .device_id = device_id,
-      .start = 0,
-      .size = 0x20000000,
-  };
-
-  if (ioctl(fd, AMDAIR_IOC_CREATE_MEM_REGION, &mr_args) == -1) {
-    printf("Kernel error in create mem region\n");
-    return HSA_STATUS_ERROR_INVALID_REGION;
-  }
-
   XAie_BackendType backend;
   printf("Failed mapping AIE BAR - using amdair backend\n");
   xaie->AieConfigPtr.Backend = XAIE_IO_BACKEND_AMDAIR;
