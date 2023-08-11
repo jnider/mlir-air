@@ -35,6 +35,9 @@ extern "C" {
 hsa_status_t air_init();
 hsa_status_t air_shut_down();
 
+void* air_malloc(size_t size);
+void air_free(void* mem);
+
 // libxaie context operations
 //
 

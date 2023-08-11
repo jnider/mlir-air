@@ -22,6 +22,7 @@ link_libraries(${XILINX_XAIE_LIBS})
 add_library(airhost STATIC
     memory.cpp
     queue.cpp
+    runtime.cpp
     host.cpp
     utility.cpp
     pcie-ernic.cpp
@@ -33,6 +34,7 @@ set_property(TARGET airhost PROPERTY POSITION_INDEPENDENT_CODE ON)
 add_library(airhost_shared SHARED
     memory.cpp
     queue.cpp
+    runtime.cpp
     host.cpp
     utility.cpp
     pcie-ernic.cpp

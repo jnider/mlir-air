@@ -103,15 +103,19 @@ main(int argc, char *argv[])
   uint64_t packet_id = wr_idx % queues[0]->size;
   hsa_agent_dispatch_packet_t herd_pkt;
   air_packet_herd_init(&herd_pkt, 0, col, 1, row, 3);
+  hsa_amd_signal_create_on_agent(1, 0, nullptr, &agents[0], 0, &herd_pkt.completion_signal);
   air_write_pkt<hsa_agent_dispatch_packet_t>(queues[0], packet_id, &herd_pkt);
   air_queue_dispatch_and_wait(&agents[0], queues[0], wr_idx, &herd_pkt);
+  hsa_signal_destroy(herd_pkt.completion_signal);
 
   wr_idx = hsa_queue_add_write_index_relaxed(queues[0], 1);
   packet_id = wr_idx % queues[0]->size;
   hsa_agent_dispatch_packet_t shim_pkt;
   air_packet_device_init(&shim_pkt, XAIE_NUM_COLS);
+  hsa_amd_signal_create_on_agent(1, 0, nullptr, &agents[0], 0, &shim_pkt.completion_signal);
   air_write_pkt<hsa_agent_dispatch_packet_t>(queues[0], packet_id, &shim_pkt);
   air_queue_dispatch_and_wait(&agents[0], queues[0], wr_idx, &shim_pkt);
+  hsa_signal_destroy(shim_pkt.completion_signal);
 
   mlir_aie_configure_cores(xaie);
   mlir_aie_configure_switchboxes(xaie);
@@ -122,8 +126,8 @@ main(int argc, char *argv[])
 #define DMA_COUNT 16
 
   // Allocating some device memory
-  uint32_t *src = (uint32_t *)air_dev_mem_alloc(DMA_COUNT * sizeof(uint32_t));
-  uint32_t *dst = (uint32_t *)air_dev_mem_alloc(DMA_COUNT * sizeof(uint32_t));
+  uint32_t *src = (uint32_t*)air_malloc(DMA_COUNT * sizeof(uint32_t));
+  uint32_t *dst = (uint32_t*)air_malloc(DMA_COUNT * sizeof(uint32_t));
 
   if (src == NULL || dst == NULL) {
     std::cout << "Could not allocate src and dst in device memory" << std::endl;
@@ -149,10 +153,12 @@ main(int argc, char *argv[])
   wr_idx = hsa_queue_add_write_index_relaxed(queues[0], 1);
   packet_id = wr_idx % queues[0]->size;
   hsa_agent_dispatch_packet_t write_pkt;
-  air_packet_nd_memcpy(&write_pkt, 0, col, 1, 0, 4, 2, air_dev_mem_get_pa(src),
+  air_packet_nd_memcpy(&write_pkt, 0, col, 1, 0, 4, 2, reinterpret_cast<uint64_t>(src),
                        DMA_COUNT * sizeof(float), 1, 0, 1, 0, 1, 0);
+  hsa_amd_signal_create_on_agent(1, 0, nullptr, &agents[0], 0, &write_pkt.completion_signal);
   air_write_pkt<hsa_agent_dispatch_packet_t>(queues[0], packet_id, &write_pkt);
   air_queue_dispatch_and_wait(&agents[0], queues[0], wr_idx, &write_pkt);
+  hsa_signal_destroy(write_pkt.completion_signal);
 
   //
   // read the data
@@ -161,10 +167,12 @@ main(int argc, char *argv[])
   wr_idx = hsa_queue_add_write_index_relaxed(queues[0], 1);
   packet_id = wr_idx % queues[0]->size;
   hsa_agent_dispatch_packet_t read_pkt;
-  air_packet_nd_memcpy(&read_pkt, 0, col, 0, 0, 4, 2, air_dev_mem_get_pa(dst),
+  air_packet_nd_memcpy(&read_pkt, 0, col, 0, 0, 4, 2, reinterpret_cast<uint64_t>(dst),
                        DMA_COUNT * sizeof(float), 1, 0, 1, 0, 1, 0);
+  hsa_amd_signal_create_on_agent(1, 0, nullptr, &agents[0], 0, &read_pkt.completion_signal);
   air_write_pkt<hsa_agent_dispatch_packet_t>(queues[0], packet_id, &read_pkt);
   air_queue_dispatch_and_wait(&agents[0], queues[0], wr_idx, &read_pkt);
+  hsa_signal_destroy(read_pkt.completion_signal);
 
   int errors = 0;
 
@@ -197,15 +205,14 @@ main(int argc, char *argv[])
 
   if (!errors) {
     printf("PASS!\n");
-    return 0;
-  }
-  else {
+  } else {
     printf("fail %d/%d.\n", errors, DMA_COUNT);
-    return -1;
   }
 
   // destroying the queue
   hsa_queue_destroy(queues[0]);
+  air_free(src);
+  air_free(dst);
 
   // Shutdown AIR and HSA
   hsa_status_t shut_down_ret = air_shut_down();
@@ -213,5 +220,5 @@ main(int argc, char *argv[])
     printf("[ERROR] air_shut_down() failed\n");
     return -1;
   }
-
+  return 0;
 }

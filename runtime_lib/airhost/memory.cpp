@@ -11,6 +11,7 @@
 #include "pcie-ernic.h"
 #include "amdair_ioctl.h"
 #include "air.hpp"
+#include "runtime.h"
 
 #include <cassert>
 #include <cstdio>
@@ -28,6 +29,17 @@ extern air_rt_herd_desc_t _air_host_active_herd;
 extern aie_libxaie_ctx_t *_air_host_active_libxaie;
 extern uint32_t *_air_host_bram_ptr;
 extern uint64_t _air_host_bram_paddr;
+}
+
+void* air_malloc(size_t size)
+{
+  void* mem(air::rocm::Runtime::runtime_->AllocateMemory(size));
+  return mem;
+}
+
+void air_free(void* mem)
+{
+  air::rocm::Runtime::runtime_->FreeMemory(mem);
 }
 
 // Global variable
@@ -122,33 +134,7 @@ int air_init_dev_mem_allocator(uint64_t dev_mem_size, uint32_t device_id) {
   dev_mem_allocator->dev_mem_size = dev_mem_size;
   dev_mem_allocator->dev_mem_ptr = 0;
 
-  // Getting userspace pointers to device memory
 #ifdef AIR_PCIE
-  int fd = open(air_get_driver_name(), O_RDWR | O_SYNC);
-  if (fd < 0) {
-    printf("[ERROR] Could not open DRAM BAR\n");
-    return 1;
-  }
-
-  // create a handle to the DRAM memory region
-  struct amdair_create_mr_args mr_args = {
-      .region = AMDAIR_MEM_RANGE_DRAM,
-      .device_id = device_id,
-      .start = 0x1C0000,
-      .size = dev_mem_size,
-  };
-
-  if (ioctl(fd, AMDAIR_IOC_CREATE_MEM_REGION, &mr_args) == -1) {
-    printf("Kernel error in create mem region\n");
-    return HSA_STATUS_ERROR_INVALID_REGION;
-  }
-  dev_mem_allocator->dev_mem =
-      (uint32_t *)mmap(NULL, dev_mem_size /*0x8000*/, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, fd, mr_args.handle);
-  if (dev_mem_allocator->dev_mem == MAP_FAILED) {
-    printf("[ERROR] Could not map DRAM BAR\n");
-    return 1;
-  }
 #else
 
 #ifndef __aarch64__
@@ -173,7 +159,8 @@ int air_init_dev_mem_allocator(uint64_t dev_mem_size, uint32_t device_id) {
 
 // Freeing the device_memory_allocator
 void air_dev_mem_allocator_free() {
-
+  if (!dev_mem_allocator)
+    return;
   munmap(dev_mem_allocator->dev_mem, dev_mem_allocator->dev_mem_size);
   dev_mem_allocator = NULL;
   free(dev_mem_allocator);

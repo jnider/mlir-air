@@ -11,6 +11,7 @@
 #include "amdair_ioctl.h"
 #include "test_library.h"
 #include "air.hpp"
+#include "runtime.h"
 
 #ifdef AIR_PCIE
 #include "utility.hpp"
@@ -97,6 +98,8 @@ hsa_status_t air_init() {
 #ifdef AIR_PCIE
 
   hsa_status_t hsa_ret = hsa_init();
+  air::rocm::Runtime::Init();
+
   if (hsa_ret != HSA_STATUS_SUCCESS) {
     std::cerr << "hsa_init failed" << std::endl;
     return hsa_ret;
@@ -108,14 +111,6 @@ hsa_status_t air_init() {
     std::cerr << "air_get_physical_devices failed" << std::endl;
     return hsa_ret;
   }
-
-  // Initializing the device memory allocator
-  if (air_init_dev_mem_allocator(0x8000 /* dev_mem_size */,
-                                 0 /* device_id (optional)*/)) {
-    std::cout << "Error creating device memory allocator" << std::endl;
-    return HSA_STATUS_ERROR;
-  }
-
   
 #endif
 
@@ -256,21 +251,21 @@ air_module_handle_t air_module_load_from_file(const char *filename, hsa_agent_t 
   int fd = open(vck5000_driver_name, O_RDWR | O_SYNC);
   assert(fd != -1 && "Failed to open bram fd");
 
-  // create a handle to the BRAM memory region
-  struct amdair_create_mr_args mr_args = {
-      .region = AMDAIR_MEM_RANGE_BRAM,
+  // create a handle to the DRAM memory region
+  struct amdair_alloc_device_memory_args alloc_mem_args = {
+      .flags = AMDAIR_IOC_ALLOC_MEM_HEAP_TYPE_DRAM,
       .device_id = device_id,
-      .start = 0x1C0000,
       .size = 0x8000,
   };
 
-  if (ioctl(fd, AMDAIR_IOC_CREATE_MEM_REGION, &mr_args) == -1) {
+  if (ioctl(fd, AMDAIR_IOC_ALLOC_DEVICE_MEMORY, &alloc_mem_args) == -1) {
     printf("Kernel error in create mem region\n");
     return HSA_STATUS_ERROR_INVALID_REGION;
   }
 
   _air_host_bram_ptr = (uint32_t *)mmap(NULL, 0x8000, PROT_READ | PROT_WRITE,
-                                        MAP_SHARED, fd, mr_args.handle);
+                                        MAP_SHARED, fd,
+                                        alloc_mem_args.mmap_offset);
   _air_host_bram_paddr = AIR_BBUFF_BASE;
 #else
 

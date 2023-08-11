@@ -138,25 +138,13 @@ hsa_status_t air_queue_wait(hsa_queue_t *q, hsa_agent_dispatch_packet_t *pkt) {
 
 hsa_status_t air_queue_dispatch_and_wait(hsa_agent_t *agent, hsa_queue_t *q, uint64_t doorbell,
                                          hsa_agent_dispatch_packet_t *pkt) {
-
-  // Creating a completion signal for the packet with the agent as the consumer
-  hsa_status_t ret = hsa_amd_signal_create(1, 1, agent, 0, &pkt->completion_signal);
-  if(ret != HSA_STATUS_SUCCESS) {
-    return HSA_STATUS_ERROR;
-  }
-
   // Ringing the doorbell
   hsa_signal_store_relaxed(q->doorbell_signal, doorbell);
 
   // wait for packet completion
   while (hsa_signal_wait_scacquire(pkt->completion_signal,
                              HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
-                             HSA_WAIT_STATE_ACTIVE) != 0) {
-    printf("packet completion signal timeout!\n");
-    printf("%x\n", pkt->header);
-    printf("%x\n", pkt->type);
-    printf("%lx\n", pkt->completion_signal.handle);
-  }
+                             HSA_WAIT_STATE_ACTIVE) != 0);
   return HSA_STATUS_SUCCESS;
 }
 
