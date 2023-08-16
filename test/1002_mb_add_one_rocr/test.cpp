@@ -102,7 +102,7 @@ main(int argc, char *argv[])
   uint64_t wr_idx = hsa_queue_add_write_index_relaxed(queues[0], 1);
   uint64_t packet_id = wr_idx % queues[0]->size;
   hsa_agent_dispatch_packet_t herd_pkt;
-  air_packet_herd_init(&herd_pkt, 0, col, 1, row, 3);
+  air_packet_segment_init(&herd_pkt, 0, col, 1, row, 3);
   hsa_amd_signal_create_on_agent(1, 0, nullptr, &agents[0], 0, &herd_pkt.completion_signal);
   air_write_pkt<hsa_agent_dispatch_packet_t>(queues[0], packet_id, &herd_pkt);
   air_queue_dispatch_and_wait(&agents[0], queues[0], wr_idx, &herd_pkt);

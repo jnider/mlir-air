@@ -149,6 +149,14 @@ uint64_t air::getTensorVolume(const Type ty) {
   }
 }
 
+std::string air::getElementTypeAsString(const mlir::Type ty) {
+  if (auto st = ty.dyn_cast<mlir::ShapedType>()) {
+    return to_string(st.getElementType());
+  } else {
+    return to_string(ty);
+  }
+}
+
 // Get the parent scf.for op of an iter_arg
 scf::ForOp air::getForRegionIterArgsOwner(Value val) {
   auto ivArg = val.dyn_cast<BlockArgument>();
@@ -214,7 +222,7 @@ void air::renumberDmaOps(func::FuncOp func, std::string mode) {
   if (mode == "global") {
     // Renumber DMA ops per entire module
     func->walk([&](Operation *func_dma) {
-      if (dyn_cast<xilinx::air::DmaMemcpyInterface>(func_dma)) {
+      if (isa<xilinx::air::DmaMemcpyNdOp>(func_dma)) {
         func_dma->setAttr(
             "id",
             mlir::IntegerAttr::get(
@@ -226,7 +234,7 @@ void air::renumberDmaOps(func::FuncOp func, std::string mode) {
       id = 0;
       // Renumber DMA ops per air herd
       herd->walk([&](Operation *herd_dma) {
-        if (dyn_cast<xilinx::air::DmaMemcpyInterface>(herd_dma)) {
+        if (isa<xilinx::air::DmaMemcpyNdOp>(herd_dma)) {
           herd_dma->setAttr(
               "id",
               mlir::IntegerAttr::get(
@@ -241,6 +249,14 @@ void air::renumberDmaOps(func::FuncOp func, std::string mode) {
 // Return op name as string
 std::string air::to_string(Operation *op) {
   return op->getName().getStringRef().str();
+}
+
+// Return mlir type name as string
+std::string air::to_string(mlir::Type t) {
+  std::string type_str;
+  llvm::raw_string_ostream rso(type_str);
+  t.print(rso);
+  return type_str;
 }
 
 // Return memory space as string
@@ -320,8 +336,16 @@ void air::eraseAIRHierarchyOperand(air::HierarchyInterface op, unsigned index) {
 // Get channel declaration through channel symbol
 air::ChannelOp
 air::getChannelDeclarationThroughSymbol(air::ChannelInterface op) {
-  auto module = op->getParentOfType<ModuleOp>();
-  return dyn_cast<air::ChannelOp>(module.lookupSymbol(op.getChanName()));
+  Operation *parent = op;
+  while (parent = parent->getParentOp()) {
+    if (parent->hasTrait<OpTrait::SymbolTable>()) {
+      auto st = mlir::SymbolTable::lookupSymbolIn(parent, op.getChanName());
+      if (st && isa<air::ChannelOp>(st)) {
+        return dyn_cast<air::ChannelOp>(st);
+      }
+    }
+  }
+  return air::ChannelOp();
 }
 
 // Get ChannelPutOp through ChannelOp
@@ -561,7 +585,7 @@ char air::checkOpOperandReadOrWrite(Value v, Operation *owner) {
 char air::checkOpOperandReadOrWrite(mlir::OpOperand &op_operand) {
   auto owner = op_operand.getOwner();
   // If used in DmaMemcpy Op
-  if (auto dma = dyn_cast<xilinx::air::DmaMemcpyInterface>(owner)) {
+  if (auto dma = dyn_cast<xilinx::air::DmaMemcpyNdOp>(owner)) {
     if (op_operand.is(dma.getSrcMemref())) {
       return 'r';
     } else if (op_operand.is(dma.getDstMemref())) {
@@ -602,4 +626,53 @@ char air::checkOpOperandReadOrWrite(mlir::OpOperand &op_operand) {
   // If unknown op
   else
     return 'u';
+}
+
+// Convert a vector of SSA returned from arith::ConstantIndexOp into a vector of
+// uints
+std::vector<unsigned>
+air::convertVecOfConstIndexToVecOfUInt(SmallVector<Value> svec) {
+  std::vector<unsigned> output;
+  for (auto v : svec) {
+    auto op = v.getDefiningOp<arith::ConstantIndexOp>();
+    if (!op)
+      return std::vector<unsigned>();
+    output.push_back(op.value());
+  }
+  return output;
+}
+
+// Get iterator corresponding to a position in a multi-dimensional vector
+unsigned air::getIteratorFromMDVector(std::vector<unsigned> dims,
+                                      std::vector<unsigned> position) {
+  if (dims.size() != position.size())
+    return 0;
+
+  std::reverse(position.begin(), position.end());
+  unsigned output = 0;
+  for (int i = dims.size() - 1; i >= 0; i--) { // In reversed order
+    unsigned scale_factor = 1;
+    for (unsigned j = i + 1; j < dims.size(); j++) {
+      scale_factor *= dims[j];
+    }
+    output += scale_factor * position[i];
+  }
+  return output;
+}
+
+// Get coordinates corresponding to a position in a multi-dimensional vector
+// from an iterator
+std::vector<unsigned> air::getMDVectorFromIterator(std::vector<unsigned> dims,
+                                                   unsigned iter) {
+  std::vector<unsigned> output;
+  for (int i = dims.size() - 1; i >= 0; i--) { // reversed order
+    unsigned denominator = 1;
+    for (int j = 0; j < i; j++) {
+      denominator *= dims[j];
+    }
+    output.push_back((iter / (denominator)) % dims[i]);
+  }
+  // Reverse to original order
+  std::reverse(output.begin(), output.end());
+  return output;
 }

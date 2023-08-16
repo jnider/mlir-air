@@ -202,21 +202,17 @@ static void generateYieldAndOrReduceToScfLoop(OpBuilder builder,
 
   auto wait_all_op_yielded = builder.create<air::WaitAllOp>(
       scf_par.getLoc(), air::AsyncTokenType::get(ctx), SmallVector<Value, 1>{});
-  auto reduce_op = builder.create<scf::ReduceOp>(
-      scf_par.getLoc(), wait_all_op_yielded.getResult(0));
-  builder.setInsertionPointToStart(&reduce_op.getRegion().front());
-  SmallVector<Value, 4> reduce_tokens;
-  reduce_tokens.push_back(reduce_op.getRegion().front().getArgument(0));
-  reduce_tokens.push_back(reduce_op.getRegion().front().getArgument(1));
-  auto reduce_res = builder.create<air::WaitAllOp>(
-      builder.getUnknownLoc(), air::AsyncTokenType::get(ctx), reduce_tokens);
-  builder.create<scf::ReduceReturnOp>(builder.getUnknownLoc(),
-                                      reduce_res.getResult(0));
+  auto reduce_op = air::createSCFReduceForAsyncSCFParallel(
+      builder, scf_par.getLoc(), wait_all_op_yielded.getAsyncToken(), ctx);
   builder.setInsertionPointToEnd(scf_par.getBody());
 
   wait_all_op_yielded->setAttr("hoist-channel", StringAttr::get(ctx, "dep"));
   reduce_op->setAttr("hoist-channel", StringAttr::get(ctx, "dep"));
-  reduce_res->setAttr("hoist-channel", StringAttr::get(ctx, "dep"));
+  reduce_op.walk([&](mlir::Operation *o) {
+    if (!isa<scf::YieldOp>(o)) {
+      o->setAttr("hoist-channel", StringAttr::get(ctx, "dep"));
+    }
+  });
 }
 
 static scf::ParallelOp hoistHerdToAsyncParallel(OpBuilder builder, Location loc,
@@ -590,7 +586,7 @@ class LinalgCopyToAIRDmaConversion : public OpRewritePattern<linalg::CopyOp> {
   }
 };
 
-unsigned getScfParDimIdFromBCastDma(air::DmaMemcpyInterface memcpyOp) {
+unsigned getScfParDimIdFromBCastDma(air::DmaMemcpyNdOp memcpyOp) {
   // Get all ops on the dependency connection between dma and herd launch
   SmallVector<Value, 1> loop_dep_history;
   std::vector<Operation *> op_history;
@@ -710,7 +706,7 @@ void replaceAIRDmaWithAIRChannelPairs(
         op->getAttrOfType<mlir::IntegerSetAttr>("broadcast_pattern").getValue();
     air::getSizesFromIntegerSet(ctx, int_set, lbs_int, ubs_int);
     SmallVector<int64_t, 2> channel_sizes = {1, 1};
-    channel_sizes[getScfParDimIdFromBCastDma(dyn_cast<air::DmaMemcpyInterface>(
+    channel_sizes[getScfParDimIdFromBCastDma(dyn_cast<air::DmaMemcpyNdOp>(
         op.getOperation()))] = ubs_int[0] - lbs_int[0] + 1;
     auto channel_op =
         createChannelOpWithBCast(builder, module, cname, loc, channel_sizes);

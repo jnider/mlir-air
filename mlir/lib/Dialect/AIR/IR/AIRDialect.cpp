@@ -921,11 +921,11 @@ OperandRange HerdOp::getSizeOperands() {
 }
 
 unsigned HerdOp::getNumKernelOperands() {
-  return getNumOperands() - getAsyncDependencies().size() - 2;
+  return getNumOperands() - getAsyncDependencies().size() - getNumDims();
 }
 
 Value HerdOp::getKernelOperand(unsigned i) {
-  return getOperand(getAsyncDependencies().size() + 2 + i);
+  return getOperand(getAsyncDependencies().size() + getNumDims() + i);
 }
 
 ArrayRef<BlockArgument> HerdOp::getKernelArguments() {
@@ -1058,7 +1058,7 @@ unsigned PipelineStageOp::getStageId() {
 }
 
 //
-// Asynchronous region
+// Asynchronous execute
 //
 
 LogicalResult ExecuteOp::verify() {
@@ -1066,6 +1066,56 @@ LogicalResult ExecuteOp::verify() {
   assert(!getBody().empty() && "ExecuteOp should have non-empty body");
 
   return success();
+}
+
+static LogicalResult FoldExecute(ExecuteOp op, PatternRewriter &rewriter) {
+
+  // if the terminator is the only thing in the ExecuteOp,
+  // and the op is unused, then it can be removed.
+  auto &body = op.getRegion().front();
+  auto et = body.getTerminator();
+  if (op.use_empty() && body.getOperations().size() == 1) {
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+  // replace returns of constants with the constant
+  int idx = 0;
+  for (auto v : et->getOperands()) {
+    idx++;
+    if (op.getResult(idx).use_empty())
+      continue;
+    auto o = v.getDefiningOp();
+    if (!o)
+      continue;
+    if (isa<arith::ConstantOp>(o)) {
+      op.getResult(idx).replaceAllUsesWith(rewriter.clone(*o)->getResult(0));
+      return success();
+    }
+  }
+
+  // if any of the results are used, return failure()
+  for (auto v : op->getResults().drop_front())
+    if (!v.use_empty())
+      return failure();
+
+  // if we get here then only the async token result has uses.
+  // if the execute body is empty, replace the execute with a wait_all no-op
+  if (body.getOperations().size() == 1) {
+    op.getResult(0).replaceAllUsesWith(
+        rewriter
+            .create<WaitAllOp>(op->getLoc(), op->getResult(0).getType(),
+                               op->getOperands())
+            .getResult(0));
+    return success();
+  }
+
+  return failure();
+}
+
+void ExecuteOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *context) {
+  patterns.add(FoldExecute);
 }
 
 //
@@ -1117,54 +1167,226 @@ void WaitAllOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
   patterns.add(FoldWaitAll);
 }
 
-static LogicalResult FoldExecute(ExecuteOp op, PatternRewriter &rewriter) {
+//
+// Channel op
+//
 
-  // if the terminator is the only thing in the ExecuteOp,
-  // and the op is unused, then it can be removed.
-  auto &body = op.getRegion().front();
-  auto et = body.getTerminator();
-  if (op.use_empty() && body.getOperations().size() == 1) {
-    rewriter.eraseOp(op);
-    return success();
+LogicalResult ChannelOp::verify() {
+  if (isBroadcast()) {
+    auto bundle_size = getSize();
+    auto broadcast_shape = getBroadcastShape();
+    if (bundle_size.size() != broadcast_shape.size())
+      return emitOpError("bundle size should match broadcast_shape size");
+    int diffDims = 0;
+    int broadcastDim = -1;
+    for (int i = 0; i < (int)bundle_size.size(); i++)
+      if (dyn_cast<IntegerAttr>(bundle_size[i]).getInt() !=
+          dyn_cast<IntegerAttr>(broadcast_shape[i]).getInt()) {
+        diffDims++;
+        broadcastDim = i;
+      }
+    if (diffDims > 1)
+      return emitOpError("bundle sizes and broadcast_shape should only differ "
+                         "along one dimension");
+    if (dyn_cast<IntegerAttr>(bundle_size[broadcastDim]).getInt() != 1)
+      return emitOpError("along the broadcast dimension the index in the "
+                         "channel bundle sizes should be equal to 1");
   }
+  return success();
+}
 
-  // replace returns of constants with the constant
-  int idx = 0;
-  for (auto v : et->getOperands()) {
-    idx++;
-    if (op.getResult(idx).use_empty())
-      continue;
-    auto o = v.getDefiningOp();
-    if (!o)
-      continue;
-    if (isa<arith::ConstantOp>(o)) {
-      op.getResult(idx).replaceAllUsesWith(rewriter.clone(*o)->getResult(0));
-      return success();
+int ChannelOp::getBroadcastDimension() {
+  int broadcastDim = -1;
+  auto bundle_size = getSize();
+  auto broadcast_shape = getBroadcastShape();
+  if (isBroadcast()) {
+    for (int i = 0; i < (int)bundle_size.size(); i++) {
+      if (dyn_cast<IntegerAttr>(bundle_size[i]).getInt() !=
+          dyn_cast<IntegerAttr>(broadcast_shape[i]).getInt()) {
+        broadcastDim = i;
+        break;
+      }
     }
   }
+  return broadcastDim;
+}
 
-  // if any of the results are used, return failure()
-  for (auto v : op->getResults().drop_front())
-    if (!v.use_empty())
-      return failure();
+static LogicalResult FoldChannel(ChannelOp op, PatternRewriter &rewriter) {
 
-  // if we get here then only the async token result has uses.
-  // if the execute body is empty, replace the execute with a wait_all no-op
-  if (body.getOperations().size() == 1) {
-    op.getResult(0).replaceAllUsesWith(
-        rewriter
-            .create<WaitAllOp>(op->getLoc(), op->getResult(0).getType(),
-                               op->getOperands())
-            .getResult(0));
-    return success();
+  Operation *parent = op;
+  std::vector<Operation *> parent_sts;
+  while (parent = parent->getParentOp()) {
+    if (parent->hasTrait<OpTrait::SymbolTable>()) {
+      parent_sts.push_back(parent);
+    }
   }
+  if (parent_sts.empty()) {
+    return failure();
+  }
+  for (auto st : parent_sts) {
+    if (mlir::SymbolTable::lookupSymbolIn(st, op.getSymName())) {
+      auto attr =
+          op->getAttrOfType<StringAttr>(SymbolTable::getSymbolAttrName());
 
+      std::vector<ChannelPutOp> puts;
+      std::vector<ChannelGetOp> gets;
+      st->walk([&](Operation *o) {
+        if (auto put = dyn_cast<air::ChannelPutOp>(o)) {
+          if (put.getChanName() == attr) {
+            puts.push_back(put);
+          }
+        } else if (auto get = dyn_cast<air::ChannelGetOp>(o)) {
+          if (get.getChanName() == attr) {
+            gets.push_back(get);
+          }
+        }
+      });
+      if (puts.empty() && gets.empty()) {
+        rewriter.eraseOp(op);
+        return success();
+      }
+    }
+  }
   return failure();
 }
 
-void ExecuteOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+void ChannelOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                             MLIRContext *context) {
-  patterns.add(FoldExecute);
+  patterns.add(FoldChannel);
+}
+
+//
+// Custom op
+//
+
+void CustomOp::build(OpBuilder &builder, OperationState &result,
+                     ValueRange asyncDependencies, ValueRange customOperands,
+                     bool isAsync, ArrayRef<NamedAttribute> attrs) {
+
+  result.addOperands(asyncDependencies);
+  if (isAsync)
+    result.addTypes(AsyncTokenType::get(builder.getContext()));
+  result.addOperands(customOperands);
+
+  SmallVector<int32_t, 8> segmentSizes(2, 1);
+  segmentSizes.front() = asyncDependencies.size();
+  segmentSizes.back() = static_cast<int32_t>(customOperands.size());
+  result.addAttribute(getOperandSegmentSizeAttr(),
+                      builder.getDenseI32ArrayAttr(segmentSizes));
+
+  for (auto attr : attrs)
+    if (attr.getName() == getOperandSegmentSizeAttr())
+      continue;
+    else
+      result.addAttribute(attr.getName(), attr.getValue());
+}
+
+void CustomOp::build(OpBuilder &builder, OperationState &result,
+                     ValueRange customOperands) {
+
+  build(builder, result, {}, customOperands, false);
+}
+
+void CustomOp::print(OpAsmPrinter &p) {
+
+  p << ' ';
+
+  auto nameAttr = (*this)->getAttrOfType<StringAttr>(
+      mlir::SymbolTable::getSymbolAttrName());
+  if (nameAttr) {
+    p.printSymbolName(nameAttr);
+    p << ' ';
+  }
+
+  printAsyncDependencies(p, *this,
+                         (getAsyncToken() ? getAsyncToken().getType() : Type()),
+                         getAsyncDependencies());
+
+  if (!getCustomOperands().empty()) {
+    auto operands = getCustomOperands();
+    p << " operands (";
+    for (int i = 0, e = getCustomOperands().size(); i < e; i++) {
+      if (i)
+        p << ", ";
+      p << operands[i];
+    }
+    p << ") : ";
+    for (int i = 0, e = getCustomOperands().size(); i < e; i++) {
+      if (i)
+        p << ", ";
+      p << operands[i].getType();
+    }
+  }
+
+  SmallVector<NamedAttribute, 8> filteredAttrs(
+      llvm::make_filter_range((*this)->getAttrs(), [&](NamedAttribute attr) {
+        if (attr.getName() == getOperandSegmentSizeAttr())
+          return false;
+        if (attr.getName() == mlir::SymbolTable::getSymbolAttrName())
+          return false;
+        return true;
+      }));
+  p << " ";
+  if (filteredAttrs.size()) {
+    p << "attributes";
+    p.printOptionalAttrDict(filteredAttrs);
+    p << " ";
+  }
+}
+
+ParseResult CustomOp::parse(OpAsmParser &parser, OperationState &result) {
+
+  SmallVector<OpAsmParser::UnresolvedOperand, 4> asyncDependencies;
+
+  StringAttr nameAttr;
+  (void)parser.parseOptionalSymbolName(
+      nameAttr, mlir::SymbolTable::getSymbolAttrName(), result.attributes);
+
+  Type asyncTokenType = nullptr;
+  if (parseAsyncDependencies(parser, asyncTokenType, asyncDependencies))
+    return failure();
+  if (asyncTokenType)
+    result.addTypes(asyncTokenType);
+
+  Type indexType = parser.getBuilder().getIndexType();
+
+  auto tokenType = AsyncTokenType::get(parser.getBuilder().getContext());
+  if (parser.resolveOperands(asyncDependencies, tokenType, result.operands))
+    return failure();
+
+  SmallVector<OpAsmParser::UnresolvedOperand, 4> customOperands;
+  SmallVector<Type, 4> types;
+  if (succeeded(parser.parseOptionalKeyword("operands"))) {
+    if (parser.parseLParen())
+      return failure();
+    if (parser.parseOptionalRParen()) {
+      do {
+        OpAsmParser::UnresolvedOperand operand;
+        if (parser.parseOperand(operand))
+          return failure();
+        customOperands.push_back(operand);
+      } while (succeeded(parser.parseOptionalComma()));
+      if (parser.parseRParen())
+        return failure();
+      if (parser.parseColonTypeList(types))
+        return failure();
+    }
+  }
+
+  for (int i = 0, e = customOperands.size(); i < e; i++) {
+    if (parser.resolveOperand(customOperands[i], types[i], result.operands))
+      return failure();
+  }
+
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+
+  SmallVector<int32_t, 8> segmentSizes(2, 1);
+  segmentSizes.front() = asyncDependencies.size();
+  segmentSizes.back() = customOperands.size();
+  result.addAttribute(getOperandSegmentSizeAttr(),
+                      parser.getBuilder().getDenseI32ArrayAttr(segmentSizes));
+  return success();
 }
 
 #include "air/Dialect/AIR/AIROpInterfaces.cpp.inc"

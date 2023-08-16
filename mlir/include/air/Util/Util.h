@@ -29,6 +29,7 @@ func::FuncOp getMangledFunction(ModuleOp module, std::string fnName,
 
 uint64_t getTensorVolume(const ShapedType ty);
 uint64_t getTensorVolume(const Type ty);
+std::string getElementTypeAsString(const mlir::Type ty);
 
 // Get the parent scf.for op of an iter_arg
 scf::ForOp getForRegionIterArgsOwner(Value val);
@@ -54,6 +55,7 @@ void renumberDmaOps(func::FuncOp func, std::string mode = "herd");
 
 // Return op name as string
 std::string to_string(Operation *op);
+std::string to_string(mlir::Type t);
 // Return memory space as string
 std::string getMemorySpaceAsString(Value memref);
 
@@ -105,6 +107,19 @@ struct LinalgTransforms {
 // Check if an operand of an operation is read or write access
 char checkOpOperandReadOrWrite(mlir::OpOperand &op_operand);
 char checkOpOperandReadOrWrite(Value op_operand, Operation *owner);
+
+// Convert a vector of SSA returned from arith::ConstantIndexOp into a vector of
+// uints
+std::vector<unsigned>
+convertVecOfConstIndexToVecOfUInt(SmallVector<Value> svec);
+
+// Get iterator corresponding to a position in a multi-dimensional vector
+unsigned getIteratorFromMDVector(std::vector<unsigned> dims,
+                                 std::vector<unsigned> position);
+// Get coordinates corresponding to a position in a multi-dimensional vector
+// from an iterator
+std::vector<unsigned> getMDVectorFromIterator(std::vector<unsigned> dims,
+                                              unsigned iter);
 
 } // namespace air
 } // namespace xilinx

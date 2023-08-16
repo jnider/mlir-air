@@ -67,6 +67,9 @@ hsa_status_t air_iterate_agents(hsa_status_t (*callback)(air_agent_t agent,
 hsa_status_t air_get_agent_info(hsa_queue_t *queue, air_agent_info_t attribute,
                                 void *data);
 
+hsa_status_t air_packet_rw32_init(dispatch_packet_t *pkt, bool is_write,
+                                  uint64_t address, uint32_t value);
+
 #ifdef AIR_PCIE
 hsa_status_t air_get_physical_devices();
 #endif
@@ -129,8 +132,8 @@ struct l2_dma_rsp_t {
   uint8_t id;
 };
 
-// initialize pkt as a herd init packet with given parameters
-hsa_status_t air_packet_herd_init(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
+// initialize pkt as a segment init packet with given parameters
+hsa_status_t air_packet_segment_init(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
                                   uint8_t start_col, uint8_t num_cols,
                                   uint8_t start_row, uint8_t num_rows);
 // uint8_t start_row, uint8_t num_rows,

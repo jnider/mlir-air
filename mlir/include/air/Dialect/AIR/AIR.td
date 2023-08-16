@@ -330,7 +330,7 @@ def air_PipelineTerminatorOp : air_Op<"pipeline.terminator", [HasParent<"HerdPip
 
 def air_DmaMemcpyNdOp: air_Op<"dma_memcpy_nd",
                         [air_AsyncOpInterface,
-                         air_DmaMemcpyInterface,
+                         air_MemcpyInterface,
                          AttrSizedOperandSegments]> {
   let summary = "dma operator";
   let arguments = (
@@ -355,12 +355,8 @@ def air_DmaMemcpyNdOp: air_Op<"dma_memcpy_nd",
     dma operator
   }];
   let extraClassDeclaration = [{
-    unsigned getNumDims() { return 0; }
     Value getSrcMemref() { return getSrc(); }
     Value getDstMemref() { return getDst(); }
-    Value getSrcMemrefDim(unsigned i) { return nullptr; }
-    Value getDstMemrefDim(unsigned i) { return nullptr; }
-    Value getLength() { return nullptr; }
     int32_t getId() {
       if (auto id_attr = (*this)->getAttrOfType<IntegerAttr>("id")) {
         return id_attr.getInt();
@@ -444,24 +440,44 @@ def air_ChannelOp : air_Op<"channel", [Symbol]>,
     ```
   }];
   let extraClassDeclaration = [{
+    bool isBroadcast() {
+      if(auto attr = getOperation()->getAttrOfType<ArrayAttr>("broadcast_shape"))
+        return true;
+      else
+        return false;
+    }
+    int getBroadcastDimension();
+    ArrayAttr getBroadcastShape() {
+      return getOperation()->getAttrOfType<ArrayAttr>("broadcast_shape");
+    }
+    int getBroadcastNum() {
+      int broadcastNum = 1;
+      if (isBroadcast())
+        for (auto bShape : getOperation()->getAttrOfType<ArrayAttr>("broadcast_shape")) {
+          auto attr = bShape.dyn_cast<IntegerAttr>().getInt();
+          broadcastNum *= attr;
+        }
+      return broadcastNum;
+    }
     int getBufferResources() {
-      if(auto attr = getOperation()->getAttrOfType<IntegerAttr>("buffer_resources")) {
+      if(auto attr = getOperation()->getAttrOfType<IntegerAttr>("buffer_resources"))
         return attr.dyn_cast<IntegerAttr>().getInt();
-      } else {
+      else
         return 1;
-      }
     }
     int getBundleSize() {
       int size = 1;
-      for (auto i : getSize()) {
+      for (auto i : getSize())
         size *= i.dyn_cast<IntegerAttr>().getInt();
-      }
       return size;
     }
   }];
+  let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def air_ChannelPutOp : air_Op<"channel.put", [air_AsyncOpInterface, 
+                                              air_MemcpyInterface, 
                                               air_ChannelInterface, 
                                               AttrSizedOperandSegments]>,
     Arguments<(ins Variadic<air_AsyncToken>:$async_dependencies,
@@ -484,19 +500,25 @@ def air_ChannelPutOp : air_Op<"channel.put", [air_AsyncOpInterface,
   }];
   let extraClassDeclaration = [{
     Value getMemref() { return getSrc(); }
+    Value getSrcMemref() { return getSrc(); }
+    Value getDstMemref() { return nullptr; }
+    OperandRange getOffsets() { return getSrcOffsets(); }
+    OperandRange getDstOffsets() { emitOpError("does not have DstOffset"); llvm_unreachable("unreachable"); }
+    OperandRange getSizes() { return getSrcSizes(); }
+    OperandRange getDstSizes() { emitOpError("does not have DstSizes"); llvm_unreachable("unreachable"); }
+    OperandRange getStrides() { return getSrcStrides(); }
+    OperandRange getDstStrides() { emitOpError("does not have DstStrides"); llvm_unreachable("unreachable"); }
     int32_t getId() {
       if (auto id_attr = (*this)->getAttrOfType<IntegerAttr>("id")) {
         return id_attr.getInt();
       }
       return -1;
     }
-    OperandRange getOffsets() { return getSrcOffsets(); }
-    OperandRange getSizes() { return getSrcSizes(); }
-    OperandRange getStrides() { return getSrcStrides(); }
   }];
 }
 
 def air_ChannelGetOp : air_Op<"channel.get", [air_AsyncOpInterface, 
+                                              air_MemcpyInterface, 
                                               air_ChannelInterface, 
                                               AttrSizedOperandSegments]>,
     Arguments<(ins Variadic<air_AsyncToken>:$async_dependencies,
@@ -519,15 +541,20 @@ def air_ChannelGetOp : air_Op<"channel.get", [air_AsyncOpInterface,
   }];
   let extraClassDeclaration = [{
     Value getMemref() { return getDst(); }
+    Value getDstMemref() { return getDst(); }
+    Value getSrcMemref() { return nullptr; }
+    OperandRange getOffsets() { return getDstOffsets(); }
+    OperandRange getSrcOffsets() { emitOpError("does not have SrcOffsets"); llvm_unreachable("unreachable"); }
+    OperandRange getSizes() { return getDstSizes(); }
+    OperandRange getSrcSizes() { emitOpError("does not have SrcSizes"); llvm_unreachable("unreachable"); }
+    OperandRange getStrides() { return getDstStrides(); }
+    OperandRange getSrcStrides() { emitOpError("does not have SrcStrides"); llvm_unreachable("unreachable"); }
     int32_t getId() {
       if (auto id_attr = (*this)->getAttrOfType<IntegerAttr>("id")) {
         return id_attr.getInt();
       }
       return -1;
     }
-    OperandRange getOffsets() { return getDstOffsets(); }
-    OperandRange getSizes() { return getDstSizes(); }
-    OperandRange getStrides() { return getDstStrides(); }
   }];
 }
 
@@ -581,6 +608,32 @@ def air_ExecuteTerminatorOp : air_Op<"execute_terminator", [HasParent<"ExecuteOp
 
   let assemblyFormat =
       [{  attr-dict ($results^ `:` type($results))? }];
+}
+
+// AIR custom op, as a handle for a user-provided AIE kernel
+
+def air_CustomOp : air_Op<"custom", [air_AsyncOpInterface,
+                                 AttrSizedOperandSegments]>,
+                        Arguments<(ins OptionalAttr<SymbolRefAttr>:$symbol,
+                                       Variadic<air_AsyncToken>:$async_dependencies,
+                                       Variadic<AnyType>:$custom_operands)>,
+                        Results<(outs Optional<air_AsyncToken>:$async_token)> {
+  let summary = "A handle to a user-customized op";
+  let description = [{
+    A placeholder operation for a user-customized op. With user-specified 
+    latency value, AIR Runner is able to simulate the system-level
+    performance with this op in place.
+  }];
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "ValueRange":$custom_operands)>,
+    OpBuilder<(ins "ValueRange":$async_dependencies,
+      "ValueRange":$custom_operands,
+      CArg<"bool", "false">:$is_async,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
+  ];
+  let hasCustomAssemblyFormat = 1;
 }
 
 #endif

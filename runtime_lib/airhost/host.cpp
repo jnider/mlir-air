@@ -390,10 +390,10 @@ uint64_t air_segment_load(const char *name) {
 
   wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_segment.q, 1);
   packet_id = wr_idx % _air_host_active_segment.q->size;
-  hsa_agent_dispatch_packet_t herd_pkt;
-  air_packet_herd_init(&herd_pkt, 0, 0, 50, 1, 8);
-  air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_segment.q, packet_id, &herd_pkt);
-  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, wr_idx, &herd_pkt);
+  hsa_agent_dispatch_packet_t segment_pkt;
+  air_packet_segment_init(&segment_pkt, 0, 0, 50, 1, 8);
+  air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_segment.q, packet_id, &segment_pkt);
+  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, wr_idx, &segment_pkt);
 
 #else
   XAie_Finish(&(_air_host_active_libxaie->DevInst));
