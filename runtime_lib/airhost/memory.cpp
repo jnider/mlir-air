@@ -42,182 +42,11 @@ void air_free(void* mem)
   air::rocm::Runtime::runtime_->FreeMemory(mem);
 }
 
-// Global variable
-air_dev_mem_allocator_t *dev_mem_allocator = NULL;
-
 // Data structure internal to the runtime to map air tensors 
 // to the information to access a remote buffer
 #ifdef AIR_PCIE
 extern std::map<void*, tensor_to_qp_map_entry*>tensor_to_qp_map;
 #endif
-
-#define PAGE_SHIFT 12
-#define PAGEMAP_LENGTH 8
-
-/* Used to get the PFN of a virtual address */
-unsigned long get_page_frame_number_of_address(void *addr) {
-  // Getting the pagemap file for the current process
-  FILE *pagemap = fopen("/proc/self/pagemap", "rb");
-
-  // Seek to the page that the buffer is on
-  unsigned long offset = (unsigned long)addr / getpagesize() * PAGEMAP_LENGTH;
-  if (fseek(pagemap, (unsigned long)offset, SEEK_SET) != 0) {
-    printf("[ERROR] Failed to seek pagemap to proper location\n");
-    exit(1);
-  }
-
-  // The page frame number is in bits 0 - 54 so read the first 7 bytes and clear
-  // the 55th bit
-  unsigned long page_frame_number = 0;
-  fread(&page_frame_number, 1, PAGEMAP_LENGTH - 1, pagemap);
-  page_frame_number &= 0x7FFFFFFFFFFFFF;
-
-  fclose(pagemap);
-  return page_frame_number;
-}
-
-/* This function is used to get the physical address of a buffer. */
-uint64_t air_mem_get_paddr(void *buff) {
-  // Getting the page frame the buffer is in
-  unsigned long page_frame_number = get_page_frame_number_of_address(buff);
-
-  // Getting the offset of the buffer into the page
-  unsigned int distance_from_page_boundary =
-      (unsigned long)buff % getpagesize();
-  uint64_t paddr = (uint64_t)(page_frame_number << PAGE_SHIFT) +
-                   (uint64_t)distance_from_page_boundary;
-
-  return paddr;
-}
-
-void *air_mem_alloc(size_t size) {
-  void *ptr = NULL;
-
-  ptr = (void *)mmap(NULL, size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-
-  if (ptr == MAP_FAILED) {
-    perror("mmap fails. ");
-    return NULL;
-  }
-
-  /* obtain physical memory */
-  // printf("obtain physical memory\n");
-  memset(ptr, 1, size);
-
-  /* lock the allocated memory in RAM */
-  // printf("lock physical memory\n");
-  mlock(ptr, size);
-
-  return ptr;
-}
-
-int air_mem_free(void *buff, size_t size) { return munmap(buff, size); }
-
-// Initializing the runtime's handle on the device memory allocator
-int air_init_dev_mem_allocator(uint64_t dev_mem_size, uint32_t device_id) {
-
-  // If already have a dev_mem_allocator just going to skip
-  // initializing
-  if (dev_mem_allocator != NULL) {
-    return 0;
-  }
-
-  dev_mem_allocator =
-      (air_dev_mem_allocator_t *)malloc(sizeof(air_dev_mem_allocator_t));
-  if (dev_mem_allocator == NULL) {
-    printf("[ERROR] Could not allocate dev_mem_allocator_t struct\n");
-    return 1;
-  }
-
-  // Initializing new struct
-  dev_mem_allocator->dev_mem_size = dev_mem_size;
-  dev_mem_allocator->dev_mem_ptr = 0;
-
-#ifdef AIR_PCIE
-#else
-
-#ifndef __aarch64__
-  printf("[ERROR] Attempting to map /dev/mem on x86. Please define AIR_PCIE "
-         "when compiling\n");
-  return 1;
-#endif
-
-  int fd = open("/dev/mem", O_RDWR | O_SYNC);
-  if (fd != -1) {
-    dev_mem_allocator->dev_mem =
-        (uint32_t *)mmap(NULL, dev_mem_size /*0x8000*/, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, fd, AIR_BBUFF_BASE);
-  } else {
-    printf("[ERROR] Could not open /dev/mem\n");
-    return 1;
-  }
-#endif
-
-  return 0;
-}
-
-// Freeing the device_memory_allocator
-void air_dev_mem_allocator_free() {
-  if (!dev_mem_allocator)
-    return;
-  munmap(dev_mem_allocator->dev_mem, dev_mem_allocator->dev_mem_size);
-  dev_mem_allocator = NULL;
-  free(dev_mem_allocator);
-}
-
-// Allocating memory on the device. Since we are treeting the memory just like a
-// stack, this is pretty straightforward as we are just giving the user the
-// next portion of memory of size that they want.
-void *air_dev_mem_alloc(uint32_t size) {
-
-  // Making sure we have a real allocator
-  if (dev_mem_allocator == NULL) {
-    printf(
-        "[ERROR] Attempting to allocate device memory without a valid device "
-        "memory allocator. Call air_init_dev_mem_allocator() first\n");
-    return NULL;
-  }
-
-  // Making sure we have enough space on the device
-  if (size + dev_mem_allocator->dev_mem_ptr > dev_mem_allocator->dev_mem_size) {
-    printf("[ERROR] Device memory cannot accept this allocation due to lack of "
-           "space\n");
-    return NULL;
-  }
-
-  // Setting the user pointer equal to the next portion
-  // of available memory
-  void *user_ptr = (void *)((unsigned char *)dev_mem_allocator->dev_mem +
-                            dev_mem_allocator->dev_mem_ptr);
-
-  // Incrementing pointer by the size of memory allocated
-  dev_mem_allocator->dev_mem_ptr += size;
-
-  return user_ptr;
-}
-
-// Used to get the physical address of device allocated through
-// the device memory allocator. Due to how memory is allocated
-// in both platforms, the offsets of the virtual and physical
-// address are the same, and we can directly convert between
-// the two.
-uint64_t air_dev_mem_get_pa(void *buff_va) {
-
-  // Making sure we have a real allocator
-  if (dev_mem_allocator == NULL) {
-    printf(
-        "[ERROR] Attempting to get a physical address without a valid device "
-        "memory allocator. Call air_init_dev_mem_allocator() first\n");
-    return 0;
-  }
-
-  // Get the virtual address offset
-  uint64_t offset = (uint64_t)buff_va - (uint64_t)(dev_mem_allocator->dev_mem);
-
-  // Adding that offset to our base physical address
-  return offset + (uint64_t)AIR_BBUFF_BASE;
-}
 
 static int64_t shim_location_data(air_herd_shim_desc_t *sd, int i, int j,
                                   int k) {
@@ -295,12 +124,16 @@ static void air_mem_shim_nd_memcpy_queue_impl(
         length_1d * sizeof(T), length_2d, stride_2d * sizeof(T), length_3d,
         stride_3d * sizeof(T), length_4d, stride_4d * sizeof(T));
 
-    air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &pkt);
+    // TODO: Right now we don't have a way of knowing when we can destroy these signals
     if (s) {
-      pkt.completion_signal = *s;
-      air_queue_dispatch(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &pkt);
+      // Fire off the packet 
+      hsa_amd_signal_create_on_agent(1, 0, nullptr, _air_host_active_herd.agent, 0, &pkt.completion_signal);
+      air_queue_dispatch(_air_host_active_herd.q, packet_id, wr_idx, &pkt);
+
+      // Set the signal that we were passed in equal to the completion signal
+      s->handle = pkt.completion_signal.handle;
     } else {
-      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &pkt);
+      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, packet_id, wr_idx, &pkt);
     }
     return;
   } else {
@@ -373,8 +206,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
                                       (uint8_t)rdma_entry->qp,
                                       (uint8_t)0);
 
-              air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &rdma_read_pkt);
-              air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &rdma_read_pkt);
+              //air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &rdma_read_pkt);
+              air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, packet_id, wr_idx, &rdma_read_pkt);
             }
 
             // Update physical address of the bounce buffer we are writing to
@@ -393,18 +226,23 @@ static void air_mem_shim_nd_memcpy_queue_impl(
 
     wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
     packet_id = wr_idx % _air_host_active_herd.q->size;
+
     hsa_agent_dispatch_packet_t memcpy_pkt;
     air_packet_nd_memcpy(&memcpy_pkt, /*herd_id=*/0, shim_col, /*direction=*/isMM2S, shim_chan, /*burst_len=*/4, /*memory_space=*/2,
-                         _air_host_bram_paddr, length*sizeof(T), 1, 0, 1, 0, 1, 0);
+                         /*_air_host_bram_paddr*/reinterpret_cast<uint64_t>(_air_host_bram_ptr), length*sizeof(T), 1, 0, 1, 0, 1, 0);
 
-    air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &memcpy_pkt);
-
+    // TODO: Right now we don't have a way of knowing when we can destroy these signals
     if (s) {
-      memcpy_pkt.completion_signal = *s;
-      air_queue_dispatch(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &memcpy_pkt);
+      // Fire off the packet 
+      // TODO: Don't wait here
+      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, packet_id, wr_idx, &memcpy_pkt, false);
+
+      // Having the signal that we were passed point to the same signal value
+      s->handle = memcpy_pkt.completion_signal.handle;
     } else {
-      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &memcpy_pkt);
+      air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, packet_id, wr_idx, &memcpy_pkt);
     }
+
     if (!isMM2S) {
       for (uint32_t index_4d = 0; index_4d < length_4d; index_4d++) {
         paddr_2d = paddr_3d;
@@ -429,8 +267,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
                                       (uint8_t)rdma_entry->qp,
                                       (uint8_t)0);
 
-              air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &rdma_write_pkt);
-              air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, wr_idx, &rdma_write_pkt);
+              //air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_herd.q, packet_id, &rdma_write_pkt);
+              air_queue_dispatch_and_wait(_air_host_active_herd.agent, _air_host_active_herd.q, packet_id, wr_idx, &rdma_write_pkt);
             }
 
             bounce_buffer_pa += length_1d * sizeof(T);

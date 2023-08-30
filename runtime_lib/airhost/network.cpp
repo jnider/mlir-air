@@ -68,10 +68,10 @@ hsa_status_t air_explore_world(uint32_t ernic_id, uint64_t dev_mem_offset, uint6
 
   // Initializing the ERNIC
   air_ernic_dev =
-      pcie_ernic_open_dev(air_get_bram_bar(0).c_str(), // axil_bar_filename
+      pcie_ernic_open_dev(""/*air_get_bram_bar(0).c_str()*/, // axil_bar_filename // TODO: Fix this
                           2097152,                     // axil_bar_size
                           bar_offset,                  // axil_bar_offset
-                          air_get_ddr_bar(0).c_str(),  // dev_mem_bar_filename
+                          ""/*air_get_ddr_bar(0).c_str()*/,  // dev_mem_bar_filename // TODO: Fix this
                           67108864,                    // dev_mem_bar_size
                           0x0000000800000000,          // dev_mem_global_offset
                           dev_mem_offset,              // dev_mem_segment_offset
@@ -339,8 +339,8 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
 
       // Need to do this because otherwise the runtime will complain the packet
       // is timing out but it is supposed to be blocking
-      air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &recv_pkt);
-      air_queue_dispatch(agent, q, wr_idx, &recv_pkt);
+      //air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &recv_pkt);
+      air_queue_dispatch(q, packet_id, wr_idx, &recv_pkt);
 
       while (hsa_signal_wait_scacquire(recv_pkt.completion_signal,
                                  HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
@@ -368,8 +368,8 @@ void air_recv(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
         ernic_sel);       // ERNIC select
 
 
-    air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &sync_send_pkt);
-    air_queue_dispatch_and_wait(agent, q, wr_idx, &sync_send_pkt);
+    //air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &sync_send_pkt);
+    air_queue_dispatch_and_wait(agent, q, packet_id, wr_idx, &sync_send_pkt);
   }
 }
 
@@ -448,8 +448,8 @@ void air_send(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
           (uint8_t)qpid,    // QPID
           ernic_sel);       // ERNIC select
 
-      air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &send_pkt);
-      air_queue_dispatch_and_wait(agent, q, wr_idx, &send_pkt);
+      //air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &send_pkt);
+      air_queue_dispatch_and_wait(agent, q, packet_id, wr_idx, &send_pkt);
     }
 
     wr_idx = hsa_queue_add_write_index_relaxed(q, 1);
@@ -465,8 +465,8 @@ void air_send(signal_t *s, tensor_t<uint32_t, 1> *t, uint32_t size,
 
     // Need to do this because otherwise the runtime will complain the packet is
     // timing out but it is supposed to be blocking
-    air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &recv_pkt);
-    air_queue_dispatch(agent, q, wr_idx, &recv_pkt);
+    //air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, &recv_pkt);
+    air_queue_dispatch(q, packet_id, wr_idx, &recv_pkt);
     while (hsa_signal_wait_scacquire(recv_pkt.completion_signal,
                                  HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
                                  HSA_WAIT_STATE_ACTIVE) != 0);

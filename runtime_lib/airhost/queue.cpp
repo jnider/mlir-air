@@ -18,6 +18,7 @@
 #include <iostream>
 #include <vector>
 
+#include "air.hpp"
 #include "air_host.h"
 #include "air_host_impl.h"
 #include "air_queue.h"
@@ -44,20 +45,16 @@ hsa_status_t air_get_agent_info(hsa_agent_t *agent, hsa_queue_t *queue, air_agen
   // Writing the fields to the packet
   aql_pkt.arg[0] = attribute;
   aql_pkt.type = AIR_PKT_TYPE_GET_INFO;
-  aql_pkt.header |= (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
-  
+  aql_pkt.return_address = 0;
+  aql_pkt.header = (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
+
   // Now, we need to send the packet out
-  air_queue_dispatch_and_wait(agent, queue, wr_idx, &aql_pkt);
+  air_queue_dispatch_and_wait(agent, queue, packet_id, wr_idx, &aql_pkt);
 
   // We encode the response in the packet, so need to peek in to get the data
-  hsa_agent_dispatch_packet_t pkt_peek = reinterpret_cast<hsa_agent_dispatch_packet_t*>(queue->base_address)[packet_id];
-  if (attribute <= AIR_AGENT_INFO_VENDOR_NAME) {
-    std::memcpy(data, &pkt_peek.return_address, 8);
-  } else {
-    /*uint64_t *p = static_cast<uint64_t *>(data);
-    *p = static_cast<uint64_t>(pkt_peek.return_address);*/
-    data = pkt_peek.return_address;
-  }
+  hsa_agent_dispatch_packet_t *pkt_peek = &reinterpret_cast<hsa_agent_dispatch_packet_t*>(queue->base_address)[packet_id];
+  std::memcpy(data, &pkt_peek->return_address, 8);
+
   return HSA_STATUS_SUCCESS;
 }
 
@@ -107,17 +104,28 @@ hsa_status_t air_queue_create(uint32_t size, uint32_t type, queue_t **queue,
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_queue_dispatch(hsa_agent_t *agent, hsa_queue_t *q, uint64_t doorbell,
+// TODO: Get rid of this complications with C++ templates, will need to move thing
+// around a bit
+hsa_status_t air_queue_dispatch(hsa_queue_t *q, uint64_t packet_id, uint64_t doorbell,
                                 hsa_agent_dispatch_packet_t *pkt) {
 
-  // Creating a completion signal for the packet with the agent as the consumer
-  hsa_status_t ret = hsa_amd_signal_create(1, 1, agent, 0, &pkt->completion_signal);
-  if(ret != HSA_STATUS_SUCCESS) {
-    return HSA_STATUS_ERROR;
-  }
+  // Write the packet to the queue
+  air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, pkt);
 
   // Ringing the doorbell
-  hsa_signal_store_relaxed(q->doorbell_signal, doorbell);
+  hsa_signal_store_screlease(q->doorbell_signal, doorbell);
+
+  return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t air_queue_dispatch(hsa_queue_t *q, uint64_t packet_id, uint64_t doorbell,
+                                hsa_barrier_and_packet_t *pkt) {
+
+  // Write the packet to the queue
+  air_write_pkt<hsa_barrier_and_packet_t>(q, packet_id, pkt);
+
+  // Ringing the doorbell
+  hsa_signal_store_screlease(q->doorbell_signal, doorbell);
 
   return HSA_STATUS_SUCCESS;
 }
@@ -136,16 +144,68 @@ hsa_status_t air_queue_wait(hsa_queue_t *q, hsa_agent_dispatch_packet_t *pkt) {
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t air_queue_dispatch_and_wait(hsa_agent_t *agent, hsa_queue_t *q, uint64_t doorbell,
-                                         hsa_agent_dispatch_packet_t *pkt) {
+hsa_status_t air_queue_wait(hsa_queue_t *q, hsa_barrier_and_packet_t *pkt) {
+  // wait for packet completion
+  while (hsa_signal_wait_scacquire(pkt->completion_signal,
+                             HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
+                             HSA_WAIT_STATE_ACTIVE) != 0) {
+    printf("packet completion signal timeout!\n");
+    printf("%x\n", pkt->header);
+    printf("%lx\n", pkt->completion_signal.handle);
+  }
+
+  return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t air_queue_dispatch_and_wait(hsa_agent_t *agent, hsa_queue_t *q, uint64_t packet_id, uint64_t doorbell,
+                                         hsa_agent_dispatch_packet_t *pkt, bool destroy_signal) {
+
+  // dispatch and wait has blocking semantics so we can internally create the signal
+  hsa_amd_signal_create_on_agent(1, 0, nullptr, agent, 0, &(pkt->completion_signal));
+
+  // Write the packet to the queue
+  air_write_pkt<hsa_agent_dispatch_packet_t>(q, packet_id, pkt);
+
   // Ringing the doorbell
-  hsa_signal_store_relaxed(q->doorbell_signal, doorbell);
+  hsa_signal_store_screlease(q->doorbell_signal, doorbell);
 
   // wait for packet completion
   while (hsa_signal_wait_scacquire(pkt->completion_signal,
                              HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
                              HSA_WAIT_STATE_ACTIVE) != 0);
+
+  // Optionally destroying the signal
+  if(destroy_signal) {
+    hsa_signal_destroy(pkt->completion_signal);
+  }
+
   return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t air_queue_dispatch_and_wait(hsa_agent_t *agent, hsa_queue_t *q, uint64_t packet_id, uint64_t doorbell,
+                                         hsa_barrier_and_packet_t *pkt, bool destroy_signal) {
+
+  // dispatch and wait has blocking semantics so we can internally create the signal
+  hsa_amd_signal_create_on_agent(1, 0, nullptr, agent, 0, &(pkt->completion_signal));
+
+  // Write the packet to the queue
+  air_write_pkt<hsa_barrier_and_packet_t>(q, packet_id, pkt);
+
+  // Ringing the doorbell
+  hsa_signal_store_screlease(q->doorbell_signal, doorbell);
+
+  // wait for packet completion
+  while (hsa_signal_wait_scacquire(pkt->completion_signal,
+                             HSA_SIGNAL_CONDITION_EQ, 0, 0x80000,
+                             HSA_WAIT_STATE_ACTIVE) != 0);
+
+  // Optionally destroying the signal
+  if(destroy_signal) {
+    hsa_signal_destroy(pkt->completion_signal);
+  }
+
+  return HSA_STATUS_SUCCESS;
+
 }
 
 hsa_status_t air_packet_segment_init(hsa_agent_dispatch_packet_t *pkt, uint16_t herd_id,
@@ -437,12 +497,11 @@ hsa_status_t air_packet_aie_lock(hsa_agent_dispatch_packet_t *pkt, uint16_t herd
                                    1, row, 1);
 }
 
-/*
-TODO: Integrate into HSA
+
 hsa_status_t air_packet_barrier_and(hsa_barrier_and_packet_t *pkt,
-                                    uint64_t dep_signal0, uint64_t dep_signal1,
-                                    uint64_t dep_signal2, uint64_t dep_signal3,
-                                    uint64_t dep_signal4) {
+                                    hsa_signal_t dep_signal0, hsa_signal_t dep_signal1,
+                                    hsa_signal_t dep_signal2, hsa_signal_t dep_signal3,
+                                    hsa_signal_t dep_signal4) {
 
   pkt->dep_signal[0] = dep_signal0;
   pkt->dep_signal[1] = dep_signal1;
@@ -453,14 +512,12 @@ hsa_status_t air_packet_barrier_and(hsa_barrier_and_packet_t *pkt,
   pkt->header = (HSA_PACKET_TYPE_BARRIER_AND << HSA_PACKET_HEADER_TYPE);
 
   return HSA_STATUS_SUCCESS;
-}*/
+}
 
-/*
-TODO: Integrate into HSA
 hsa_status_t air_packet_barrier_or(hsa_barrier_or_packet_t *pkt,
-                                   uint64_t dep_signal0, uint64_t dep_signal1,
-                                   uint64_t dep_signal2, uint64_t dep_signal3,
-                                   uint64_t dep_signal4) {
+                                   hsa_signal_t dep_signal0, hsa_signal_t dep_signal1,
+                                   hsa_signal_t dep_signal2, hsa_signal_t dep_signal3,
+                                   hsa_signal_t dep_signal4) {
 
   pkt->dep_signal[0] = dep_signal0;
   pkt->dep_signal[1] = dep_signal1;
@@ -471,4 +528,4 @@ hsa_status_t air_packet_barrier_or(hsa_barrier_or_packet_t *pkt,
   pkt->header = (HSA_PACKET_TYPE_BARRIER_OR << HSA_PACKET_HEADER_TYPE);
 
   return HSA_STATUS_SUCCESS;
-}*/
+}

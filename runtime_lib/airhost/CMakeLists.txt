@@ -24,7 +24,6 @@ add_library(airhost STATIC
     queue.cpp
     runtime.cpp
     host.cpp
-    utility.cpp
     pcie-ernic.cpp
     pcie-ernic-dev-mem-allocator.cpp
     network.cpp
@@ -36,7 +35,6 @@ add_library(airhost_shared SHARED
     queue.cpp
     runtime.cpp
     host.cpp
-    utility.cpp
     pcie-ernic.cpp
     pcie-ernic-dev-mem-allocator.cpp
     network.cpp
@@ -76,5 +74,5 @@ foreach(file ${INSTALLS})
 endforeach()
 
 # Install files
-set(INSTALLS memory.cpp queue.cpp host.cpp utility.cpp pcie-ernic.cpp pcie-ernic-dev-mem-allocator.cpp network.cpp)
+set(INSTALLS memory.cpp queue.cpp host.cpp pcie-ernic.cpp pcie-ernic-dev-mem-allocator.cpp network.cpp)
 install(FILES ${INSTALLS} DESTINATION ${CMAKE_INSTALL_PREFIX}/runtime_lib/airhost)

@@ -13,10 +13,6 @@
 #include "air.hpp"
 #include "runtime.h"
 
-#ifdef AIR_PCIE
-#include "utility.hpp"
-#endif
-
 #include <assert.h>
 #include <dirent.h>
 #include <dlfcn.h>
@@ -45,6 +41,8 @@
 
 #define SYSFS_PATH_MAX 63
 
+#define BOUNCE_BUFFER_SIZE 0x8000
+
 // temporary solution to stash some state
 extern "C" {
 
@@ -57,12 +55,6 @@ air_module_handle_t _air_host_active_module = (air_module_handle_t) nullptr;
 
 const char vck5000_driver_name[] = "/dev/amdair";
 }
-
-#ifdef AIR_PCIE
-std::vector<air_physical_device_t> physical_devices;
-#endif
-
-
 
 // Determining if an hsa agent is an AIE agent or not
 hsa_status_t find_aie(hsa_agent_t agent, void *data)
@@ -79,8 +71,6 @@ hsa_status_t find_aie(hsa_agent_t agent, void *data)
 
   aie_agents = static_cast<std::vector<hsa_agent_t>*>(data);
   status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
-
-  printf("[EDDIE DEBUG] Done calling agent info. Device type is 0x%x\n", device_type);
 
   if (status != HSA_STATUS_SUCCESS) {
     return status;
@@ -105,13 +95,6 @@ hsa_status_t air_init() {
     return hsa_ret;
   }
 
-  hsa_ret = air_get_physical_devices();
-
-  if (hsa_ret != HSA_STATUS_SUCCESS) {
-    std::cerr << "air_get_physical_devices failed" << std::endl;
-    return hsa_ret;
-  }
-  
 #endif
 
   if (_air_host_active_libxaie == nullptr)
@@ -132,8 +115,6 @@ hsa_status_t air_shut_down() {
 
   if (_air_host_active_libxaie)
     air_deinit_libxaie((air_libxaie_ctx_t)_air_host_active_libxaie);
-
-  air_dev_mem_allocator_free();
 
   hsa_status_t hsa_ret = hsa_shut_down();
   if(hsa_ret != HSA_STATUS_SUCCESS) {
@@ -181,10 +162,6 @@ in future versions.
 For a non-PCIe device, memory map the base address directly.
 */
 #ifdef AIR_PCIE
-  if (device_id >= physical_devices.size()) {
-    printf("[ERROR] No device id %d in system\n", device_id);
-    return (air_libxaie_ctx_t) nullptr;
-  }
 
   char sysfs_path[SYSFS_PATH_MAX + 1];
   if (snprintf(sysfs_path, SYSFS_PATH_MAX, "/sys/class/amdair/amdair/%02u",
@@ -242,30 +219,8 @@ air_module_handle_t air_module_load_from_file(const char *filename, hsa_agent_t 
 
 #ifdef AIR_PCIE
 
-  if (device_id >= physical_devices.size()) {
-    printf("[ERROR] No device id %d in system\n", device_id);
-    return 0;
-  }
+  _air_host_bram_ptr = (uint32_t*)air_malloc(BOUNCE_BUFFER_SIZE);
 
-  int fd = open(vck5000_driver_name, O_RDWR | O_SYNC);
-  assert(fd != -1 && "Failed to open bram fd");
-
-  // create a handle to the DRAM memory region
-  struct amdair_alloc_device_memory_args alloc_mem_args = {
-      .flags = AMDAIR_IOC_ALLOC_MEM_HEAP_TYPE_DRAM,
-      .device_id = device_id,
-      .size = 0x8000,
-  };
-
-  if (ioctl(fd, AMDAIR_IOC_ALLOC_DEVICE_MEMORY, &alloc_mem_args) == -1) {
-    printf("Kernel error in create mem region\n");
-    return HSA_STATUS_ERROR_INVALID_REGION;
-  }
-
-  _air_host_bram_ptr = (uint32_t *)mmap(NULL, 0x8000, PROT_READ | PROT_WRITE,
-                                        MAP_SHARED, fd,
-                                        alloc_mem_args.mmap_offset);
-  _air_host_bram_paddr = AIR_BBUFF_BASE;
 #else
 
 #ifndef __aarch64__
@@ -304,7 +259,8 @@ int32_t air_module_unload(air_module_handle_t handle) {
   }
   if (_air_host_active_module == handle) {
     _air_host_active_module = (air_module_handle_t) nullptr;
-    munmap(_air_host_bram_ptr, 0x8000);
+
+    air_free(_air_host_bram_ptr);
     _air_host_bram_paddr = 0;
   }
 
@@ -360,6 +316,7 @@ air_module_desc_t *air_module_get_desc(air_module_handle_t handle) {
 }
 
 uint64_t air_segment_load(const char *name) {
+
   assert(_air_host_active_libxaie);
 
   auto segment_desc = air_segment_get_desc(_air_host_active_module, name);
@@ -381,19 +338,20 @@ uint64_t air_segment_load(const char *name) {
                      &(_air_host_active_libxaie->AieConfigPtr));
   XAie_PmRequestTiles(&(_air_host_active_libxaie->DevInst), NULL, 0);
 
+  //
+  // Set up a 1x3 herd starting 7,0
+  //
   uint64_t wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_segment.q, 1);
   uint64_t packet_id = wr_idx % _air_host_active_segment.q->size;
   hsa_agent_dispatch_packet_t shim_pkt;
   air_packet_device_init(&shim_pkt, XAIE_NUM_COLS);
-  air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_segment.q, packet_id, &shim_pkt);
-  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, wr_idx, &shim_pkt);
+  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, packet_id, wr_idx, &shim_pkt);
 
   wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_segment.q, 1);
   packet_id = wr_idx % _air_host_active_segment.q->size;
   hsa_agent_dispatch_packet_t segment_pkt;
   air_packet_segment_init(&segment_pkt, 0, 0, 50, 1, 8);
-  air_write_pkt<hsa_agent_dispatch_packet_t>(_air_host_active_segment.q, packet_id, &segment_pkt);
-  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, wr_idx, &segment_pkt);
+  air_queue_dispatch_and_wait(_air_host_active_segment.agent, _air_host_active_segment.q, packet_id, wr_idx, &segment_pkt);
 
 #else
   XAie_Finish(&(_air_host_active_libxaie->DevInst));
@@ -464,21 +422,6 @@ uint64_t air_herd_load(const char *name) {
   return 0;
 }
 
-#ifdef AIR_PCIE
-hsa_status_t air_get_physical_devices() {
-  struct stat st;
-
-  // Skip device enumeration if it is already done
-  if (physical_devices.size() != 0)
-    return HSA_STATUS_SUCCESS;
-
-  air_physical_device_t temp_physical_device;
-  physical_devices.push_back(temp_physical_device);
-
-  return HSA_STATUS_SUCCESS;
-}
-#endif
-
 hsa_status_t air_iterate_agents(hsa_status_t (*callback)(air_agent_t agent,
                                                          void *data),
                                 void *data) {
@@ -534,81 +477,67 @@ hsa_status_t air_iterate_agents(hsa_status_t (*callback)(air_agent_t agent,
 
 #ifdef AIR_PCIE
 const char *air_get_driver_name(void) { return vck5000_driver_name; }
-
-std::string air_get_ddr_bar(uint32_t device_id) {
-  if (device_id >= physical_devices.size()) {
-    printf("[ERROR] Attempting to grab BAR of device %d which does not exist\n",
-           device_id);
-    return "";
-  }
-  return std::string(physical_devices.at(device_id).dram_bar_path);
-}
-
-std::string air_get_aie_bar(uint32_t device_id) {
-  if (device_id >= physical_devices.size()) {
-    printf("[ERROR] Attempting to grab BAR of device %d which does not exist\n",
-           device_id);
-    return "";
-  }
-  return std::string(physical_devices.at(device_id).aie_bar_path);
-}
-std::string air_get_bram_bar(uint32_t device_id) {
-  if (device_id >= physical_devices.size()) {
-    printf("[ERROR] Attempting to grab BAR of device %d which does not exist\n",
-           device_id);
-    return "";
-  }
-  return std::string(physical_devices.at(device_id).bram_bar_path);
-}
 #endif
 
-/*
-
-// TODO: Have wait all use proper HSA
-
 uint64_t air_wait_all(std::vector<uint64_t> &signals) {
-  queue_t *q = _air_host_active_segment.q;
+  hsa_queue_t *q = _air_host_active_segment.q;
   if (!q) {
     printf("WARNING: no queue provided, air_wait_all will return without "
            "waiting\n");
     return 0;
   }
 
-  std::vector<dispatch_packet_t *> packets;
+  // Containing all of the barrier packets. This is needed because
+  // we might have to wait on more than 5 signals.
+  std::vector<hsa_barrier_and_packet_t> packets;
+
+  // iterate over the signals in chunks of 5
   while (signals.size()) {
     if (signals.size() < 5)
       signals.resize(5, 0);
 
-    std::vector<uint64_t> addrs;
+    // Vector which contains the handles of the signals that we are going to wait on
+    std::vector<hsa_signal_t> signals_in_pkt;
     bool non_zero = false;
     for (auto s : signals) {
       if (s) {
-        addrs.push_back(((signal_t *)s)->handle);
+        // Push back the proper signal
+        signals_in_pkt.push_back(*reinterpret_cast<hsa_signal_t *>(s));
         non_zero = true;
       } else {
-        addrs.push_back(AIR_VCK190_SHMEM_BASE + MB_SHMEM_SIGNAL_OFFSET);
+        // Create a dummy signal that will have a handle of 0
+        hsa_signal_t dummy_signal;
+        hsa_amd_signal_create_on_agent(0, 0, nullptr, _air_host_active_segment.agent, 0, &dummy_signal);
+        dummy_signal.handle = 0; // The barrier and packet will ignore a signal with handle of 0
+        signals_in_pkt.push_back(dummy_signal);
       }
     }
     if (non_zero) {
-      uint64_t wr_idx = queue_add_write_index(q, 1);
-      uint64_t packet_id = wr_idx % q->size;
-      dispatch_packet_t *barrier_pkt =
-          (dispatch_packet_t *)(q->base_address_vaddr) + packet_id;
-      air_packet_barrier_and((barrier_and_packet_t *)barrier_pkt, addrs[0],
-                             addrs[1], addrs[2], addrs[3], addrs[4]);
-      signal_create(1, 0, NULL, (signal_t *)&barrier_pkt->completion_signal);
-      air_queue_dispatch(q, wr_idx, barrier_pkt);
+
+      // Submit a barrier packet for 5 signals that we are waiting on
+      uint64_t wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_segment.q, 1);
+      uint64_t packet_id = wr_idx % _air_host_active_segment.q->size;
+      hsa_barrier_and_packet_t barrier_pkt;
+      air_packet_barrier_and(&barrier_pkt, signals_in_pkt[0], signals_in_pkt[1], signals_in_pkt[2], signals_in_pkt[3], signals_in_pkt[4]);
+      hsa_amd_signal_create_on_agent(1, 0, nullptr, _air_host_active_segment.agent, 0, &barrier_pkt.completion_signal);
+      air_queue_dispatch(_air_host_active_segment.q, packet_id, wr_idx, &barrier_pkt);
+
+      // Put it in a vector of barrier packets so we can wait on all of them after they are submitted 
       packets.push_back(barrier_pkt);
     }
+
+    // Remove the 5 signals from our vector and keep going if we have more
     signals.resize(signals.size() - 5);
   }
 
-  for (auto p : packets)
-    air_queue_wait(q, p);
+  // Submit each packet and delete the completion signal
+  for (auto p : packets) {
+    air_queue_wait(q, &p);
+    hsa_signal_destroy(p.completion_signal);
+  }
 
   return 0;
 }
-*/
 
 uint64_t air_get_tile_addr(uint32_t col, uint32_t row) {
   if (_air_host_active_libxaie == NULL)
@@ -644,8 +573,7 @@ uint64_t _mlir_ciface___airrt_segment_load(const char *name) {
   return air_segment_load(name);
 }
 
-// TODO: Have wait all fucntionality use HSA
-/*void _mlir_ciface___airrt_wait_all_0_0() { return; }
+void _mlir_ciface___airrt_wait_all_0_0() { return; }
 void _mlir_ciface___airrt_wait_all_0_1(uint64_t e0) {
   std::vector<uint64_t> events{e0, 0, 0, 0, 0};
   air_wait_all(events);
@@ -678,6 +606,6 @@ uint64_t _mlir_ciface___airrt_wait_all_1_3(uint64_t e0, uint64_t e1,
                                            uint64_t e2) {
   std::vector<uint64_t> events{e0, e1, e2, 0, 0};
   return air_wait_all(events);
-}*/
+}
 
 } // extern C
