@@ -13,9 +13,9 @@
 #include <stdint.h>
 #include <vector>
 
-template<typename T>
+template <typename T>
 inline void air_write_pkt(hsa_queue_t *q, uint32_t packet_id, T *pkt) {
-  reinterpret_cast<T*>(q->base_address)[packet_id] = *pkt;
+  reinterpret_cast<T *>(q->base_address)[packet_id] = *pkt;
 }
 
 inline hsa_status_t air_get_agents(std::vector<hsa_agent_t> &agents) {
@@ -32,8 +32,9 @@ inline hsa_status_t air_get_agents(std::vector<air_agent_t> &agents) {
       (void *)&agents);
 }
 
-
-
 uint64_t air_wait_all(std::vector<uint64_t> &signals);
 
+hsa_status_t air_load_airbin(hsa_agent_t *agent, hsa_queue_t *q,
+                             const char *filename, uint8_t column,
+                             uint32_t device_id = 0);
 #endif

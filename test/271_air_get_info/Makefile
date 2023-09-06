@@ -14,6 +14,7 @@ LDFLAGS = -fuse-ld=lld -rdynamic \
 		-lm \
 		-Wl,--no-as-needed -ldl \
     -Wl,-rpath,/scratch/tgutierr/rocm/lib /scratch/tgutierr/rocm/lib/libhsa-runtime64.so.1.9.0 \
+		../../elfutils/libelf/libelf.a \
 
 CFLAGS += -g -I/opt/xaiengine/include
 CFLAGS += -I/scratch/tgutierr/rocm/include

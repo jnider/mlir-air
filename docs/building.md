@@ -62,6 +62,11 @@ Next, clone and build MLIR-AIE with paths to llvm, aienginev2, and cmakeModules 
 ./build-mlir-aie-local.sh llvm mlir-aie/cmake/modulesXilinx /opt/xaiengine mlir-aie build ../../install
 ```
 
+Next, we are going to need to clone and build elfutils. This is used in the runtime to unpack and decode AIE application binaries. 
+```
+./github-clone-build-elfutils.sh
+```
+
 The MLIR-AIE tools will be able to generate binaries targetting AIEngines.
 
 Finally, build the MLIR-AIR tools for your desired use case: 
@@ -97,7 +102,7 @@ export LD_LIBRARY_PATH=/opt/xaiengine/lib:${LD_LIBRARY_PATH}
 Use the following command to build the AIR tools to compile on x86 for PCIe cards (VCK5000). If using this command exactly, make sure that ${ROCM\_ROOT} is pointing to your ROCM install:
 
 ```
-./utils/build-mlir-air-pcie.sh utils/llvm/ utils/mlir-aie/cmake/modulesXilinx/ utils/mlir-aie/ /opt/xaiengine ${ROCM_ROOT}/lib/cmake/hsa-runtime64/ ${ROCM_ROOT}/lib/cmake/hsakmt/
+./utils/build-mlir-air-pcie.sh utils/llvm/ utils/mlir-aie/cmake/modulesXilinx/ utils/mlir-aie/ /opt/xaiengine utils/elfutils/ ${ROCM_ROOT}/lib/cmake/hsa-runtime64/ ${ROCM_ROOT}/lib/cmake/hsakmt/
 ```
 
 The PCIe AIR runtime requires the use of the [AIR PCIe kernel driver](driver). The driver directory contains documentation on how to compile and load the AIR PCIe kernel driver.

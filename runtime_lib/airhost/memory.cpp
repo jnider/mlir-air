@@ -6,11 +6,11 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "air.hpp"
 #include "air_host.h"
 #include "air_host_impl.h"
-#include "pcie-ernic.h"
 #include "amdair_ioctl.h"
-#include "air.hpp"
+#include "pcie-ernic.h"
 #include "runtime.h"
 
 #include <cassert>
@@ -31,21 +31,17 @@ extern uint32_t *_air_host_bram_ptr;
 extern uint64_t _air_host_bram_paddr;
 }
 
-void* air_malloc(size_t size)
-{
-  void* mem(air::rocm::Runtime::runtime_->AllocateMemory(size));
+void *air_malloc(size_t size) {
+  void *mem(air::rocm::Runtime::runtime_->AllocateMemory(size));
   return mem;
 }
 
-void air_free(void* mem)
-{
-  air::rocm::Runtime::runtime_->FreeMemory(mem);
-}
+void air_free(void *mem) { air::rocm::Runtime::runtime_->FreeMemory(mem); }
 
 // Data structure internal to the runtime to map air tensors 
 // to the information to access a remote buffer
 #ifdef AIR_PCIE
-extern std::map<void*, tensor_to_qp_map_entry*>tensor_to_qp_map;
+extern std::map<void *, tensor_to_qp_map_entry *> tensor_to_qp_map;
 #endif
 
 static int64_t shim_location_data(air_herd_shim_desc_t *sd, int i, int j,
@@ -85,15 +81,14 @@ static void air_mem_shim_nd_memcpy_queue_impl(
   //       stride_4d, stride_3d, stride_2d);
 
 #ifdef AIR_PCIE
-  // Checking our internal representation to determine if the buffer is 
-  // remote or local. If we don't find anything in our map, we say it 
+  // Checking our internal representation to determine if the buffer is
+  // remote or local. If we don't find anything in our map, we say it
   // is local
   struct tensor_to_qp_map_entry *rdma_entry = tensor_to_qp_map[t->alloc];
   bool is_local = true;
-  if(rdma_entry != NULL) {
+  if (rdma_entry != NULL) {
     is_local = (rdma_entry->qp == 0);
-  }
-  else {
+  } else {
     is_local = true; // If not in our map make it local
   }
 #endif
@@ -113,7 +108,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
       stride *= t->shape[R - i - 1];
     }
 
-    uint64_t wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
+    uint64_t wr_idx =
+        hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
     uint64_t packet_id = wr_idx % _air_host_active_herd.q->size;
 
     hsa_agent_dispatch_packet_t pkt;
@@ -140,7 +136,7 @@ static void air_mem_shim_nd_memcpy_queue_impl(
     uint32_t *bounce_buffer = _air_host_bram_ptr;
 
 #ifdef AIR_PCIE
-    // Only used for RDMA requests so only defining when 
+    // Only used for RDMA requests so only defining when
     // using PCIe
     uint64_t bounce_buffer_pa = _air_host_bram_paddr;
 #endif
@@ -159,16 +155,14 @@ static void air_mem_shim_nd_memcpy_queue_impl(
         for (uint32_t index_2d = 0; index_2d < length_2d; index_2d++)
           length += length_1d;
 
-
 #ifdef AIR_PCIE
     size_t p;
 
-    // Setting the virtual address depending on 
+    // Setting the virtual address depending on
     // if the buffer is local or remote
-    if(is_local) {
+    if (is_local) {
       p = (size_t)t->data + offset;
-    }
-    else {
+    } else {
       p = (size_t)rdma_entry->vaddr + offset;
     }
 #else
@@ -189,13 +183,14 @@ static void air_mem_shim_nd_memcpy_queue_impl(
         paddr_2d = paddr_3d;
         for (uint32_t index_3d = 0; index_3d < length_3d; index_3d++) {
           paddr_1d = paddr_2d;
-          for (uint32_t index_2d=0;index_2d<length_2d;index_2d++) {
+          for (uint32_t index_2d = 0; index_2d < length_2d; index_2d++) {
 #ifdef AIR_PCIE
-            if(is_local) {
-              memcpy((size_t*)bounce_buffer, (size_t*)paddr_1d, length_1d*sizeof(T));
-            }
-            else {
-              wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
+            if (is_local) {
+              memcpy((size_t *)bounce_buffer, (size_t *)paddr_1d,
+                     length_1d * sizeof(T));
+            } else {
+              wr_idx =
+                  hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
               packet_id = wr_idx % _air_host_active_herd.q->size;
               air_packet_post_rdma_wqe(&rdma_read_pkt,
                                       (uint64_t)paddr_1d,
@@ -213,7 +208,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
             // Update physical address of the bounce buffer we are writing to
             bounce_buffer_pa += length_1d * sizeof(T);
 #else
-            memcpy((size_t*)bounce_buffer, (size_t*)paddr_1d, length_1d*sizeof(T));
+            memcpy((size_t *)bounce_buffer, (size_t *)paddr_1d,
+                   length_1d * sizeof(T));
 #endif
             bounce_buffer += length_1d;
             paddr_1d += stride_2d * sizeof(T);
@@ -248,13 +244,14 @@ static void air_mem_shim_nd_memcpy_queue_impl(
         paddr_2d = paddr_3d;
         for (uint32_t index_3d = 0; index_3d < length_3d; index_3d++) {
           paddr_1d = paddr_2d;
-          for (uint32_t index_2d=0;index_2d<length_2d;index_2d++) {
+          for (uint32_t index_2d = 0; index_2d < length_2d; index_2d++) {
 #ifdef AIR_PCIE
-            if(is_local) {
-              memcpy((size_t*)paddr_1d, (size_t*)bounce_buffer, length_1d*sizeof(T));
-            }
-            else {
-              wr_idx = hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
+            if (is_local) {
+              memcpy((size_t *)paddr_1d, (size_t *)bounce_buffer,
+                     length_1d * sizeof(T));
+            } else {
+              wr_idx =
+                  hsa_queue_add_write_index_relaxed(_air_host_active_herd.q, 1);
               packet_id = wr_idx % _air_host_active_herd.q->size;
               hsa_agent_dispatch_packet_t rdma_write_pkt;
 
@@ -273,7 +270,8 @@ static void air_mem_shim_nd_memcpy_queue_impl(
 
             bounce_buffer_pa += length_1d * sizeof(T);
 #else
-            memcpy((size_t*)paddr_1d, (size_t*)bounce_buffer, length_1d*sizeof(T));
+            memcpy((size_t *)paddr_1d, (size_t *)bounce_buffer,
+                   length_1d * sizeof(T));
 #endif
             bounce_buffer += length_1d;
             paddr_1d += stride_2d * sizeof(T);
@@ -288,7 +286,7 @@ static void air_mem_shim_nd_memcpy_queue_impl(
 
 #define mlir_air_dma_nd_memcpy(mangle, rank, space, type)                      \
   void _mlir_ciface___airrt_dma_nd_memcpy_##mangle(                            \
-      hsa_signal_t *s, uint32_t id, uint64_t x, uint64_t y, void *t,               \
+      hsa_signal_t *s, uint32_t id, uint64_t x, uint64_t y, void *t,           \
       uint64_t offset_3, uint64_t offset_2, uint64_t offset_1,                 \
       uint64_t offset_0, uint64_t length_3, uint64_t length_2,                 \
       uint64_t length_1, uint64_t length_0, uint64_t stride_2,                 \
