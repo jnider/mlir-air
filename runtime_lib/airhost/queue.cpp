@@ -552,11 +552,12 @@ hsa_status_t air_packet_barrier_or(hsa_barrier_or_packet_t *pkt,
   'table' is an offset from the beginning of device memory
 */
 hsa_status_t air_packet_load_airbin(hsa_agent_dispatch_packet_t *pkt,
-                                    uint64_t table) {
+                                    uint64_t table, uint16_t column) {
   DBG_PRINT("%s: table @ %lx\r\n", __func__, table);
   pkt->type = AIR_PKT_TYPE_AIRBIN;
   pkt->header = (HSA_PACKET_TYPE_AGENT_DISPATCH << HSA_PACKET_HEADER_TYPE);
   pkt->arg[0] = table;
+  pkt->arg[1] = column;
 
   return HSA_STATUS_SUCCESS;
 }
@@ -711,7 +712,7 @@ hsa_status_t air_load_airbin(hsa_agent_t *agent, hsa_queue_t *q,
   // Send configuration packet
   DBG_PRINT("Notifying device\n");
   wr_idx = hsa_queue_add_write_index_relaxed(q, 1);
-  air_packet_load_airbin(&pkt, (uint64_t)airbin_table);
+  air_packet_load_airbin(&pkt, (uint64_t)airbin_table, (uint16_t)column);
 
   // clock_gettime(CLOCK_BOOTTIME, &ts_start);
   air_queue_dispatch_and_wait(agent, q, wr_idx % q->size, wr_idx, &pkt);

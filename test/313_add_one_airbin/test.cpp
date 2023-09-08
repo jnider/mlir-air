@@ -30,7 +30,7 @@
 int main(int argc, char *argv[]) {
   int ret;
   uint64_t row = 0;
-  uint64_t col = 6;
+  uint64_t col = 10;
   uint64_t wr_idx;
   uint64_t packet_id;
   hsa_queue_t *q = nullptr;
