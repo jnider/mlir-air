@@ -12,36 +12,50 @@ LD_SRCS += \
 vck5000.ld
 
 OBJS += \
+./$(OUTPUT)/asm_vectors.o \
 ./$(OUTPUT)/aie.o \
+./$(OUTPUT)/boot.o \
 ./$(OUTPUT)/cdma.o \
-./$(OUTPUT)/main.o \
-./$(OUTPUT)/platform.o \
-./$(OUTPUT)/shell.o \
+./$(OUTPUT)/glue.o \
 ./$(OUTPUT)/hsa.o \
 ./$(OUTPUT)/hsa_csr.o \
+./$(OUTPUT)/interrupt.o \
+./$(OUTPUT)/main.o \
 ./$(OUTPUT)/memory.o \
-./$(OUTPUT)/arm_bp_intf.o \
+./$(OUTPUT)/platform.o \
+./$(OUTPUT)/printf.o \
+./$(OUTPUT)/shell.o \
+./$(OUTPUT)/uart.o \
 
+CC=aarch64-none-elf-gcc
+CFLAGS := -Wall -O2 -g3 -c -fmessage-length=0 -mcpu=cortex-a72 -DARM_CONTROLLER $(chatty)
 CXX=aarch64-none-elf-g++
 CXXFLAGS := -Wall -O2 -g3 -c -fmessage-length=0 -mcpu=cortex-a72 -DARM_CONTROLLER $(chatty)
-LIBS := -Wl,--start-group,-lxil,-lgcc,-lc,-lstdc++,--end-group
+LIBS := -Wl,--start-group,-lgcc,-lc,-lstdc++,--end-group
 OUTPUT := vck5000_obj
-BSP_ARM := bsp/arm
-BSP_ARM_INCLUDE := $(BSP_ARM)/psv_cortexa72_0/include
-BSP_ARM_LIB := $(BSP_ARM)/psv_cortexa72_0/lib
 
-INCLUDES += -I../airhost/include -I$(BSP_ARM_INCLUDE) -Ibp/include -I/scratch/tgutierr/rocm/include
-
-#	sed -i 's/_SIZE : 0x2000/_SIZE : 0x100000/g' $<; \
-# pull in dependency info for *existing* .o files
-#-include $(OBJS:.o=.d)
+INCLUDES += -I../airhost/include -Ibp/include -I$(ROCM_ROOT)/include
 
 all: dirs vck5000.elf secondary-outputs
 
 # Each subdirectory must supply rules for building sources it contributes
+$(OUTPUT)/%.o: %.c
+	@echo 'Building file: $<'
+	@echo 'Invoking: ARM v8 c compiler'
+	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -MF"$(@:%.o=%.d)" -MT"$(@)" -o "$@" "$<"
+	@echo 'Finished building: $<'
+	@echo ' '
+
 $(OUTPUT)/%.o: %.cpp
 	@echo 'Building file: $<'
 	@echo 'Invoking: ARM v8 g++ compiler'
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF"$(@:%.o=%.d)" -MT"$(@)" -o "$@" "$<"
+	@echo 'Finished building: $<'
+	@echo ' '
+
+$(OUTPUT)/%.o: %.S
+	@echo 'Building file: $<'
+	@echo 'Invoking: ARM v8 assembler'
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -MF"$(@:%.o=%.d)" -MT"$(@)" -o "$@" "$<"
 	@echo 'Finished building: $<'
 	@echo ' '
@@ -55,10 +69,10 @@ dirs:
 	mkdir -p $(OUTPUT)
 
 # Tool invocations
-vck5000.elf: $(OBJS) vck5000.ld $(BSP_ARM_LIB)/libxil.a
+vck5000.elf: $(OBJS) vck5000.ld
 	@echo 'Building target: $@'
 	@echo 'Invoking: ARM v8 g++ linker'
-	$(CXX) -mcpu=cortex-a72 -Wl,-T -Wl,vck5000.ld -L$(BSP_ARM_LIB) -o "$@" $(OBJS) $(LIBS)
+	$(CXX) -mcpu=cortex-a72 -Wl,-T -Wl,vck5000.ld $(LIBS) $(OBJS) -o $@
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -68,16 +82,11 @@ vck5000.elf.size: vck5000.elf
 	@echo 'Finished building: $@'
 	@echo ' '
 
-$(BSP_ARM_LIB)/libxil.a:
-	@echo 'Building BSP'
-	$(MAKE) -C $(BSP_ARM)
-
 RM := rm -rf
 
 # Other Targets
 clean:
 	-$(RM) $(OBJS) $(ELFSIZE) $(OUTPUT) vck5000.elf
-	$(MAKE) -C $(BSP_ARM) clean
 	-@echo ' '
 
 secondary-outputs: $(ELFSIZE)

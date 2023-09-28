@@ -6,11 +6,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "shell.h"
+#include "aie.h"
 #include "cdma.h"
 #include "platform.h"
-#include "xuartpsv_hw.h"
+#include "uart.h"
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MAX_LINE_LENGTH 256
 #define MAX_CMD_LENGTH 15
@@ -73,13 +76,13 @@ static void command_aie(char *line) {
     return;
 
   if (!op_str || strcmp(op_str, "status") == 0) {
-    xil_printf("aie status col=%d row=%d\r\n", col, row);
+    printf("aie status col=%d row=%d\r\n", col, row);
     mlir_aie_print_tile_status(col, row);
   } else if (strcmp(op_str, "reset") == 0) {
-    xil_printf("aie reset col=%d row=%d\r\n", col, row);
+    printf("aie reset col=%d row=%d\r\n", col, row);
     aie_tile_reset(col, row);
   } else if (strcmp(op_str, "enable") == 0) {
-    xil_printf("aie enable col=%d row=%d\r\n", col, row);
+    printf("aie enable col=%d row=%d\r\n", col, row);
     aie_tile_enable(col, row);
   }
 }
@@ -94,11 +97,11 @@ static void command_cp(char *line) {
   uint64_t base = get_base_address();
 
   cp_count = *(uint32_t *)(base + 0x208);
-  xil_printf("Number of command processors: %u\r\n", cp_count);
+  printf("Number of command processors: %u\r\n", cp_count);
 
   uint64_t *queue_base = (uint64_t *)base;
   for (uint32_t idx = 0; idx < cp_count; idx++) {
-    xil_printf("[%02u]\t0x%llx\r\n", idx, queue_base[idx]);
+    printf("[%02u]\t0x%lx\r\n", idx, queue_base[idx]);
   }
 }
 
@@ -128,7 +131,7 @@ static void command_diff(char *line) {
 
   // limit the length to prevent mistakes
   if (length > MAX_DIFF_LENGTH) {
-    xil_printf("Limiting to 0x%x\r\n", MAX_DIFF_LENGTH);
+    printf("Limiting to 0x%x\r\n", MAX_DIFF_LENGTH);
     length = MAX_DIFF_LENGTH;
   }
 
@@ -141,7 +144,7 @@ static void command_diff(char *line) {
     w2 = *(uint32_t *)second;
     if (w1 != w2) {
       identical = 0;
-      xil_printf("[0x%lx] 0x%x != 0x%x\r\n", second, w1, w2);
+      printf("[0x%lx] 0x%x != 0x%x\r\n", second, w1, w2);
     }
 
     first += 4;
@@ -149,7 +152,7 @@ static void command_diff(char *line) {
   }
 
   if (identical)
-    xil_printf("Identical!\r\n");
+    printf("Identical!\r\n");
 }
 
 /*
@@ -186,17 +189,17 @@ static void command_help(char *line) {
   uint32_t ll = 0; // line length
   uint32_t len;    // string length
 
-  xil_printf("Supported commands:\r\n");
+  printf("Supported commands:\r\n");
 
   for (uint32_t idx = 0; idx < NUM_CMDS; idx++) {
     len = strlen(command_tbl[idx].cmd) + 1;
     if (ll + len > 80) {
       ll = len;
-      xil_printf("\r\n");
+      printf("\r\n");
     }
-    xil_printf("%s ", command_tbl[idx].cmd);
+    printf("%s ", command_tbl[idx].cmd);
   }
-  xil_printf("\r\n");
+  printf("\r\n");
 }
 
 /*
@@ -229,13 +232,12 @@ static void command_read(char *line) {
     w[0] = IO_READ32(address + i);
     w[1] = IO_READ32(address + i + 4);
 
-    xil_printf("[%16llx]: %02x %02x %02x %02x %02x %02x %02x %02x | "
-               "%c%c%c%c%c%c%c%c\r\n",
-               address + i, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
-               bytes[5], bytes[6], bytes[7], to_ascii(bytes[0]),
-               to_ascii(bytes[1]), to_ascii(bytes[2]), to_ascii(bytes[3]),
-               to_ascii(bytes[4]), to_ascii(bytes[5]), to_ascii(bytes[6]),
-               to_ascii(bytes[7]));
+    printf("[%16lx]: %02x %02x %02x %02x %02x %02x %02x %02x | "
+           "%c%c%c%c%c%c%c%c\r\n",
+           address + i, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+           bytes[5], bytes[6], bytes[7], to_ascii(bytes[0]), to_ascii(bytes[1]),
+           to_ascii(bytes[2]), to_ascii(bytes[3]), to_ascii(bytes[4]),
+           to_ascii(bytes[5]), to_ascii(bytes[6]), to_ascii(bytes[7]));
   }
 }
 
@@ -250,13 +252,13 @@ static void command_write(char *line) {
   val_str = strtok(NULL, " ");
 
   if (address_str) {
-    xil_printf("address_str: %s\r\n", address_str);
+    printf("address_str: %s\r\n", address_str);
     address = strtoul(address_str, NULL, 0);
   }
   if (val_str)
     val = strtoul(val_str, NULL, 0);
 
-  xil_printf("write 0x%x to 0x%lx\r\n", val, address);
+  printf("write 0x%x to 0x%lx\r\n", val, address);
   uint32_t *w = (uint32_t *)address;
   *w = val;
 }
@@ -268,8 +270,8 @@ static void command_reset(char *line) {
   block_str = strtok(NULL, " ");
 
   if (!block_str) {
-    xil_printf("Invalid block name\r\n");
-    xil_printf("options: array device\r\n");
+    printf("Invalid block name\r\n");
+    printf("options: array device\r\n");
     return;
   }
 
@@ -299,27 +301,27 @@ void shell(void) {
     cmd_len = 0;
 
     // good old DOS prompt
-    xil_printf("C:\\> ");
+    printf("C:\\> ");
   }
 
   // handle all characters from the UART (which is a slow interface) so the UI
   // is responsive. If no character is waiting, go back to processing queues.
-  while (XUartPsv_IsReceiveData(STDOUT_BASEADDRESS)) {
+  while (uart_IsReceiveData()) {
 
     // When we know that we have data, read it from the UART
-    in = XUartPsv_RecvByte(STDOUT_BASEADDRESS);
+    in = uart_RecvByte();
 
     // make sure character will fit in the command buffer
     if (cmd_len >= MAX_LINE_LENGTH) {
-      xil_printf("Line too long\r\n");
+      printf("Line too long\r\n");
       new_cmd = 1;
       break;
     }
 
     // if it's a return character, handle the command
     if (in == '\r' || in == '\n') {
-      XUartPsv_SendByte(STDOUT_BASEADDRESS, '\r');
-      XUartPsv_SendByte(STDOUT_BASEADDRESS, '\n');
+      uart_SendByte('\r');
+      uart_SendByte('\n');
       handle_command();
       new_cmd = 1;
       break;
@@ -329,6 +331,6 @@ void shell(void) {
     line[cmd_len] = 0;
 
     // reflect the typed character back for confirmation
-    XUartPsv_SendByte(STDOUT_BASEADDRESS, in);
+    uart_SendByte(in);
   }
 }

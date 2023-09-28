@@ -8,16 +8,11 @@
 #ifndef __PLATFORM_H_
 #define __PLATFORM_H_
 
-#include <cstdint>
 #include "hsa.h"
-
-extern "C" {
-#ifdef ARM_CONTROLLER
-#include "xaiengine.h"
-#endif // ARM_CONTROLLER
-}
+#include <cstdint>
 
 #define NPI_BASE 0xF70A0000UL
+#define UART_BASE 0xFF000000UL
 
 #define DRAM_1_BASE 0x000800000000ULL
 #define DRAM_1_SIZE 0x000380000000ULL
@@ -31,26 +26,18 @@ extern "C" {
 #define AIE_BASE 0x020000000000ULL
 #define AIE_CSR_SIZE 0x000100000000ULL
 
+#define ernic_0_base 0x0000020100080000UL
+#define ernic_1_base 0x00000201000C0000UL
+#define shmem_base 0x020100000000ULL
+
 #define IO_READ32(addr) *((volatile uint32_t *)(addr))
 #define IO_WRITE32(addr, val) *((volatile uint32_t *)(addr)) = val
 
-struct aie_libxaie_ctx_t {
-  XAie_Config AieConfigPtr;
-  XAie_DevInst DevInst;
-};
+#define HIGH_ADDR(addr) ((addr & 0xffffffff00000000ULL) >> 32)
+#define LOW_ADDR(addr) (addr & 0x00000000ffffffffULL)
 
 void init_platform();
 void cleanup_platform();
-
-void mlir_aie_print_dma_status(int col, int row);
-void mlir_aie_print_shimdma_status(uint16_t col);
-void mlir_aie_print_tile_status(int col, int row);
-
-void aie_tile_reset(int col, int row);
-void aie_tile_enable(int col, int row);
-
-void xaie_device_init(void);
-void xaie_array_reset(void);
 
 /*
         Return the base address of the interface data structures
