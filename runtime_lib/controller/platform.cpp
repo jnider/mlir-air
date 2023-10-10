@@ -32,6 +32,8 @@
 
 #include "platform.h"
 #include "uart.h"
+#include "interrupt.h"
+#include <stdio.h>
 
 void enable_caches() {
 #ifdef __PPC__
@@ -68,8 +70,16 @@ void init_platform() {
    */
   /* ps7_init();*/
   /* psu_init();*/
-  enable_caches();
+  //enable_caches();
   uart_init(UART_BASE);
+  uart_SendByte('A');
+  uart_SendByte('B');
+  uart_SendByte('C');
+  uart_SendByte('D');
+  uart_SendByte('\r');
+  uart_SendByte('\n');
+  printf("UART ready!\r\n");
+  gic_init(GIC_BASE, GIC_DIST_BASE);
 }
 
 void cleanup_platform() { disable_caches(); }
